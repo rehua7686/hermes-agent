@@ -2354,6 +2354,7 @@ def _make_agent(sid: str, key: str, session_id: str | None = None):
         provider=runtime.get("provider"),
         base_url=runtime.get("base_url"),
         api_key=runtime.get("api_key"),
+        default_headers=runtime.get("headers"),
         api_mode=runtime.get("api_mode"),
         acp_command=runtime.get("command"),
         acp_args=runtime.get("args"),
