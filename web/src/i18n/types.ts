@@ -42,6 +42,7 @@ export interface Translations {
     inactive: string;
     unknown: string;
     untitled: string;
+    all?: string;
     none: string;
     form: string;
     noResults: string;
@@ -106,6 +107,7 @@ export interface Translations {
     statusOverview: string;
     system: string;
     webUi: string;
+    pluginLabels?: Record<string, string>;
   };
 
   // ── Status page ──
@@ -217,6 +219,18 @@ export interface Translations {
     component: string;
     lines: string;
     noLogLines: string;
+    fileAgent?: string;
+    fileErrors?: string;
+    fileGateway?: string;
+    levelDebug?: string;
+    levelInfo?: string;
+    levelWarning?: string;
+    levelError?: string;
+    compGateway?: string;
+    compAgent?: string;
+    compTools?: string;
+    compCli?: string;
+    compCron?: string;
   };
 
   // ── Cron page ──
@@ -361,6 +375,10 @@ export interface Translations {
     failedToLoadRaw: string;
     configImported: string;
     invalidJson: string;
+    themes?: {
+      labels: Record<string, string>;
+      descriptions: Record<string, string>;
+    };
     categories: {
       general: string;
       agent: string;
@@ -377,6 +395,22 @@ export interface Translations {
       logging: string;
       discord: string;
       auxiliary: string;
+      bedrock?: string;
+      curator?: string;
+      kanban?: string;
+      lsp?: string;
+      matrix?: string;
+      mattermost?: string;
+      model_catalog?: string;
+      openrouter?: string;
+      secrets?: string;
+      sessions?: string;
+      slack?: string;
+      tool_loop_guardrails?: string;
+      tool_output?: string;
+      updates?: string;
+      web?: string;
+      x_search?: string;
     };
   };
 
@@ -531,6 +565,8 @@ export interface Translations {
       visibility_discovered: string;
       visibility_secret: string;
     };
+    categories?: Record<string, string>;
+    achievementData?: Record<string, { name: string; description: string }>;
     share: {
       dialog_label: string;
       header: string;
