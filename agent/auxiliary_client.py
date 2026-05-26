@@ -3829,13 +3829,18 @@ def resolve_provider_client(
 
 
 # Retryable HTTP status codes for auxiliary fallback.
-_RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503})
+# 402 = Payment Required (credit exhaustion — DeepSeek, OpenRouter)
+# 408 = Request Timeout
+# 429 = Rate Limited
+# 5xx = Server errors
+_RETRYABLE_HTTP_STATUSES = frozenset({402, 408, 429, 500, 502, 503, 504})
 
 
 def _is_retryable_error(e: Exception) -> bool:
     """Return True if *e* is an API error that should trigger a fallback retry.
 
-    Covers rate limits (429), server errors (5xx), auth failures (401),
+    Covers rate limits (429), payment/credit exhaustion (402),
+    server errors (5xx), timeout errors (408, 504), auth failures (401),
     and network-level failures.
 
     Order matters: AuthenticationError is a subclass of APIStatusError,

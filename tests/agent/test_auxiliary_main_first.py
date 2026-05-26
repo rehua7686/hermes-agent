@@ -498,6 +498,25 @@ class TestIsRetryableError:
         err = openai.APIStatusError("bad request", response=response, body={})
         assert _is_retryable_error(err) is False
 
+    def test_402_payment_error_is_retryable(self):
+        import openai
+        from agent.auxiliary_client import _is_retryable_error
+        response = MagicMock()
+        response.status_code = 402
+        response.headers = {}
+        err = openai.APIStatusError(
+            "Insufficient Balance", response=response, body={}
+        )
+        assert _is_retryable_error(err) is True
+
+    def test_504_gateway_timeout_is_retryable(self):
+        import openai
+        from agent.auxiliary_client import _is_retryable_error
+        response = MagicMock()
+        response.status_code = 504
+        err = openai.APIStatusError("upstream timeout", response=response, body={})
+        assert _is_retryable_error(err) is True
+
 
 class TestModelContextLimit:
     """_get_model_context_limit returns expected values."""
