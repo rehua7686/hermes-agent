@@ -2215,7 +2215,6 @@ Environment="HOME={home_dir}"
 Environment="USER={username}"
 Environment="LOGNAME={username}"
 Environment="PATH={sane_path}"
-Environment="VIRTUAL_ENV={venv_dir}"
 Environment="HERMES_HOME={hermes_home}"
 Restart=always
 RestartSec=5
@@ -2250,7 +2249,6 @@ Type=simple
 ExecStart={python_path} -m hermes_cli.main{f" {profile_arg}" if profile_arg else ""} gateway run --replace
 WorkingDirectory={working_dir}
 Environment="PATH={sane_path}"
-Environment="VIRTUAL_ENV={venv_dir}"
 Environment="HERMES_HOME={hermes_home}"
 Restart=always
 RestartSec=5
