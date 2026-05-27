@@ -4885,3 +4885,147 @@ class TestFeishuMentionEndToEnd(unittest.TestCase):
         # Body: leading @Hermes stripped, Alice preserved, trailing text intact.
         self.assertIn("@Alice review the spec with Alice", event.text)
         self.assertNotIn("@Hermes @Alice", event.text)
+
+
+class TestCardTableLimitSplitting(unittest.TestCase):
+    """Verify Feishu CardKit table-count splitting (ErrCode 11310 workaround).
+
+    Feishu rejects any interactive card whose total GFM table count exceeds
+    _CARD_MAX_TABLES (5, verified empirically against the live Feishu API on
+    2026-05-27). The limit is per-CARD, not per-element — splitting the
+    content across multiple markdown elements within a single card does NOT
+    bypass the limit (5+1, 4+2, all-single-table layouts all fail). When
+    content has more tables, we therefore split it into multiple cards before
+    sending.
+    """
+
+    def _make_table(self, idx: int) -> str:
+        return (
+            f"\n\n### Section {idx}\n\n"
+            "| A | B | C |\n"
+            "|---|---|---|\n"
+            "| 1 | 2 | 3 |\n"
+            "| 4 | 5 | 6 |\n"
+        )
+
+    def _count_tables(self, card: dict) -> int:
+        from gateway.platforms.feishu import _MARKDOWN_TABLE_RE
+
+        return sum(
+            len(_MARKDOWN_TABLE_RE.findall(el["content"]))
+            for el in card["body"]["elements"]
+        )
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_table_routes_to_interactive_card(self):
+        """A simple table goes to a CardKit 2.0 interactive card, not text."""
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        msg_type, payload = adapter._build_outbound_payload(
+            "## Title\n" + self._make_table(1)
+        )
+        self.assertEqual(msg_type, "interactive")
+        card = json.loads(payload)
+        self.assertEqual(card["schema"], "2.0")
+        self.assertEqual(card["body"]["elements"][0]["tag"], "markdown")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_under_limit_yields_single_card(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        content = "## Title\n" + "".join(self._make_table(i + 1) for i in range(5))
+        messages = adapter._build_outbound_messages(content)
+
+        self.assertEqual(len(messages), 1)
+        msg_type, payload = messages[0]
+        self.assertEqual(msg_type, "interactive")
+        card = json.loads(payload)
+        self.assertEqual(self._count_tables(card), 5)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_over_limit_yields_multiple_cards(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        # 6 tables — must split into 2 cards (5 + 1) because per-card cap is 5.
+        content = "## Title\n" + "".join(self._make_table(i + 1) for i in range(6))
+        messages = adapter._build_outbound_messages(content)
+
+        self.assertEqual(len(messages), 2)
+        for msg_type, _ in messages:
+            self.assertEqual(msg_type, "interactive")
+
+        first = json.loads(messages[0][1])
+        second = json.loads(messages[1][1])
+        self.assertEqual(self._count_tables(first), 5)
+        self.assertEqual(self._count_tables(second), 1)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_far_over_limit_splits_into_three_cards(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        # 12 tables → 3 cards (5 + 5 + 2).
+        content = "## Title\n" + "".join(self._make_table(i + 1) for i in range(12))
+        messages = adapter._build_outbound_messages(content)
+
+        self.assertEqual(len(messages), 3)
+        table_counts = [self._count_tables(json.loads(p)) for _, p in messages]
+        self.assertEqual(table_counts, [5, 5, 2])
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_no_tables_uses_post_or_text_routing(self):
+        """Non-table content keeps the existing post/text routing untouched."""
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        messages = adapter._build_outbound_messages("just plain text")
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0][0], "text")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_prose_between_tables_stays_with_following_table(self):
+        """Splitting cuts at section boundaries — each table's heading and
+        lead-in prose travel with it, not with the previous chunk."""
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        parts = []
+        for i in range(6):
+            parts.append(f"\n\nIntro paragraph {i + 1}.")
+            parts.append(self._make_table(i + 1))
+        content = "## Title" + "".join(parts)
+        messages = adapter._build_outbound_messages(content)
+
+        self.assertEqual(len(messages), 2)
+        first_content = json.loads(messages[0][1])["body"]["elements"][0]["content"]
+        second_content = json.loads(messages[1][1])["body"]["elements"][0]["content"]
+        for i in range(1, 6):
+            self.assertIn(f"Intro paragraph {i}", first_content)
+            self.assertIn(f"### Section {i}", first_content)
+        # Section 6's intro and heading must travel with table 6 into card 2.
+        self.assertIn("Intro paragraph 6", second_content)
+        self.assertIn("### Section 6", second_content)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_multiline_code_block_routes_to_interactive_card(self):
+        """Multi-line fenced code blocks render correctly in CardKit 2.0
+        markdown elements but get truncated by the post/md tag, so they
+        also route to interactive cards."""
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        content = "Output:\n```python\nprint('a')\nprint('b')\nprint('c')\n```"
+        msg_type, payload = adapter._build_outbound_payload(content)
+        self.assertEqual(msg_type, "interactive")
+        card = json.loads(payload)
+        self.assertIn("```python", card["body"]["elements"][0]["content"])
