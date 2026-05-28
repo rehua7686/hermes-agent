@@ -8268,6 +8268,7 @@ class GatewayRunner:
             await self.hooks.emit("session:start", {
                 "platform": source.platform.value if source.platform else "",
                 "user_id": source.user_id,
+                "chat_id": source.chat_id or "",
                 "session_id": session_entry.session_id,
                 "session_key": session_key,
             })
@@ -9425,6 +9426,7 @@ class GatewayRunner:
         await self.hooks.emit("session:end", {
             "platform": source.platform.value if source.platform else "",
             "user_id": source.user_id,
+            "chat_id": source.chat_id or "",
             "session_key": session_key,
         })
 
@@ -9432,6 +9434,7 @@ class GatewayRunner:
         await self.hooks.emit("session:reset", {
             "platform": source.platform.value if source.platform else "",
             "user_id": source.user_id,
+            "chat_id": source.chat_id or "",
             "session_key": session_key,
         })
 
