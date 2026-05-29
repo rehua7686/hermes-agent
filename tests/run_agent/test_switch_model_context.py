@@ -6,7 +6,7 @@ from run_agent import AIAgent
 from agent.context_compressor import ContextCompressor
 
 
-def _make_agent_with_compressor(config_context_length=None) -> AIAgent:
+def _make_agent_with_compressor(config_context_length=None, threshold_tokens_override=None) -> AIAgent:
     """Build a minimal AIAgent with a context_compressor, skipping __init__."""
     agent = AIAgent.__new__(AIAgent)
 
@@ -31,6 +31,7 @@ def _make_agent_with_compressor(config_context_length=None) -> AIAgent:
         provider="openrouter",
         quiet_mode=True,
         config_context_length=config_context_length,
+        threshold_tokens_override=threshold_tokens_override,
     )
     agent.context_compressor = compressor
 
@@ -73,3 +74,23 @@ def test_switch_model_without_config_context_length():
         mock_ctx_len.assert_called_once()
         call_kwargs = mock_ctx_len.call_args.kwargs
         assert call_kwargs.get("config_context_length") is None
+
+
+def test_switch_model_preserves_threshold_tokens_override():
+    """Absolute compression thresholds should not be re-derived on model switch."""
+    agent = _make_agent_with_compressor(
+        config_context_length=None,
+        threshold_tokens_override=80_000,
+    )
+
+    with patch("agent.model_metadata.get_model_context_length", return_value=200_000):
+        agent.switch_model(
+            "new-model",
+            "openrouter",
+            api_key="sk-new",
+            base_url="https://openrouter.ai/api/v1",
+        )
+
+    compressor = getattr(agent, "context_compressor")
+    assert compressor.threshold_tokens_override == 80_000
+    assert compressor.threshold_tokens == 80_000
