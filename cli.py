@@ -4979,7 +4979,7 @@ class HermesCLI:
                 enabled_toolsets=self.enabled_toolsets,
                 disabled_toolsets=self.disabled_toolsets,
                 verbose_logging=self.verbose,
-                quiet_mode=not self.verbose,
+                quiet_mode=(self.tool_progress_mode == "off"),
                 ephemeral_system_prompt=self.system_prompt if self.system_prompt else None,
                 prefill_messages=self.prefill_messages or None,
                 reasoning_config=self.reasoning_config,
@@ -9624,6 +9624,9 @@ class HermesCLI:
 
         if self.agent:
             self.agent.reasoning_callback = self._current_reasoning_callback()
+            # Keep agent quiet_mode in sync with the new tool_progress_mode
+            # so tool_executor rendering paths stay consistent.
+            self.agent.quiet_mode = (self.tool_progress_mode == "off")
 
         # Use raw ANSI codes via _cprint so the output is routed through
         # prompt_toolkit's renderer.  self.console.print() with Rich markup
