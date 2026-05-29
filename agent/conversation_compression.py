@@ -176,15 +176,30 @@ def check_compression_model_feasibility(agent: Any) -> None:
             # the raw messages plus a small summarisation instruction.
             old_threshold = threshold
             new_threshold = aux_context
-            agent.context_compressor.threshold_tokens = new_threshold
-            # Keep threshold_percent in sync so future main-model
-            # context_length changes (update_model) re-derive from a
-            # sensible number rather than the original too-high value.
             main_ctx = agent.context_compressor.context_length
-            if main_ctx:
-                agent.context_compressor.threshold_percent = (
-                    new_threshold / main_ctx
+            if hasattr(agent.context_compressor, "set_threshold_tokens_override"):
+                agent.context_compressor.set_threshold_tokens_override(
+                    new_threshold,
+                    update_percent=True,
                 )
+                # Some tests use MagicMock(spec=ContextCompressor); calling the
+                # setter there records the call but cannot mutate attributes.
+                # Keep the legacy live fields accurate as a defensive fallback.
+                if getattr(agent.context_compressor, "threshold_tokens", None) != new_threshold:
+                    agent.context_compressor.threshold_tokens = new_threshold
+                    if main_ctx:
+                        agent.context_compressor.threshold_percent = (
+                            new_threshold / main_ctx
+                        )
+            else:
+                agent.context_compressor.threshold_tokens = new_threshold
+                # Keep threshold_percent in sync so future main-model
+                # context_length changes (update_model) re-derive from a
+                # sensible number rather than the original too-high value.
+                if main_ctx:
+                    agent.context_compressor.threshold_percent = (
+                        new_threshold / main_ctx
+                    )
             safe_pct = int((aux_context / main_ctx) * 100) if main_ctx else 50
             # Build human-readable "model (provider)" labels for both
             # the main model and the compression model so users can
