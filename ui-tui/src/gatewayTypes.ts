@@ -336,6 +336,7 @@ export interface VoiceToggleResponse {
   record_key?: string
   stt_available?: boolean
   tts?: boolean
+  tts_interrupt?: boolean
 }
 
 export interface VoiceRecordResponse {
