@@ -1026,7 +1026,10 @@ def _get_env_config() -> Dict[str, Any]:
     # remote home, and everything else starts in the backend's default
     # root-like cwd.
     if env_type == "local":
-        default_cwd = os.getcwd()
+        try:
+            default_cwd = os.getcwd()
+        except FileNotFoundError:
+            default_cwd = os.getenv("HOME", "/root")
     elif env_type == "ssh":
         default_cwd = "~"
     else:
