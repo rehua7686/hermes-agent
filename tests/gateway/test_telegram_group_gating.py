@@ -1005,3 +1005,31 @@ def test_triggered_voice_message_uses_shared_session_in_observe_mode():
         assert "[Alice Example|111]" in event.text
 
     asyncio.run(_run())
+
+
+def test_channel_media_post_uses_effective_message():
+    async def _run():
+        adapter = _make_adapter(require_mention=False)
+        adapter.handle_message = AsyncMock()
+        channel_post = _group_voice_message(
+            chat_id=-1003993579952,
+            caption="JD PDF upload",
+        )
+        channel_post.chat.type = "channel"
+        channel_post.chat.title = "Job scout"
+        channel_post.from_user = None
+        update = SimpleNamespace(
+            update_id=3003,
+            message=None,
+            effective_message=channel_post,
+        )
+
+        await adapter._handle_media_message(update, SimpleNamespace())
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.call_args[0][0]
+        assert event.source.chat_id == "-1003993579952"
+        assert event.source.chat_type == "channel"
+        assert event.text == "JD PDF upload"
+
+    asyncio.run(_run())
