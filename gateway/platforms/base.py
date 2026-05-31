@@ -583,12 +583,14 @@ def _looks_like_image(data: bytes) -> bool:
     return False
 
 
-def cache_media_from_bytes(data: bytes, ext: str = ".bin") -> str:
+def cache_media_from_bytes(data: bytes, ext: str = ".bin", is_image: bool = False) -> str:
     """Save raw media bytes to the cache and return the absolute file path."""
     import uuid
     from hermes_constants import get_hermes_dir
     # Ensure directory exists
-    cache_dir = get_hermes_dir("cache/media", "media_cache")
+    cache_subdir = "cache/images" if is_image else "cache/media"
+    cache_env = "image_cache" if is_image else "media_cache"
+    cache_dir = get_hermes_dir(cache_subdir, cache_env)
     cache_dir.mkdir(parents=True, exist_ok=True)
     
     file_path = cache_dir / f"{uuid.uuid4().hex}{ext}"
@@ -607,7 +609,7 @@ def cache_image_from_bytes(data: bytes, ext: str = ".jpg") -> str:
             f"Refusing to cache non-image data as {ext} "
             f"(starts with: {snippet!r})"
         )
-    return cache_media_from_bytes(data, ext=ext)
+    return cache_media_from_bytes(data, ext=ext, is_image=True)
 
 
 async def cache_image_from_url(url: str, ext: str = ".jpg", retries: int = 2) -> str:
