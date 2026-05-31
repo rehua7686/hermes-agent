@@ -6627,8 +6627,8 @@ class GatewayRunner:
 
         user_id = source.user_id
 
-        # Telegram (and similar) authorize entire group/forum/channel chats
-        # by chat ID via TELEGRAM_GROUP_ALLOWED_CHATS / QQ_GROUP_ALLOWED_USERS.
+        # Telegram, Feishu, and similar platforms authorize entire
+        # group/forum/channel chats by chat ID via *_GROUP_ALLOWED_CHATS.
         # That allowlist is chat-scoped, so it must work even when
         # source.user_id is None — Telegram emits anonymous-admin posts,
         # sender_chat traffic, and channel broadcasts with no `from_user`,
@@ -6640,6 +6640,7 @@ class GatewayRunner:
         if source.chat_type in {"group", "forum", "channel"} and source.chat_id:
             chat_allowlist_env = {
                 Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_CHATS",
+                Platform.FEISHU: "FEISHU_GROUP_ALLOWED_CHATS",
                 Platform.QQBOT: "QQ_GROUP_ALLOWED_USERS",
             }.get(source.platform, "")
             if chat_allowlist_env:
@@ -6652,6 +6653,7 @@ class GatewayRunner:
                     }
                     if "*" in allowed_group_ids or source.chat_id in allowed_group_ids:
                         return True
+                    return False
 
         if not user_id:
             return False
@@ -6680,6 +6682,7 @@ class GatewayRunner:
         }
         platform_group_chat_env_map = {
             Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_CHATS",
+            Platform.FEISHU: "FEISHU_GROUP_ALLOWED_CHATS",
             Platform.QQBOT: "QQ_GROUP_ALLOWED_USERS",
         }
         platform_allow_all_map = {
@@ -6757,9 +6760,9 @@ class GatewayRunner:
             # No allowlists configured -- check global allow-all flag
             return os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}
 
-        # Telegram can optionally authorize group traffic by chat ID.
-        # Keep this separate from TELEGRAM_GROUP_ALLOWED_USERS, which gates
-        # the sender user ID for group/forum messages.
+        # Some platforms can optionally authorize group traffic by chat ID.
+        # Keep this separate from group user allowlists, which gate the
+        # sender user ID for group/forum messages.
         if group_chat_allowlist and source.chat_type in {"group", "forum"} and source.chat_id:
             allowed_group_ids = {
                 chat_id.strip() for chat_id in group_chat_allowlist.split(",") if chat_id.strip()
@@ -6902,6 +6905,7 @@ class GatewayRunner:
                     "TELEGRAM_GROUP_ALLOWED_USERS",
                     "TELEGRAM_GROUP_ALLOWED_CHATS",
                 ),
+                Platform.FEISHU: ("FEISHU_GROUP_ALLOWED_CHATS",),
                 Platform.QQBOT: ("QQ_GROUP_ALLOWED_USERS",),
             }
             if os.getenv(platform_env_map.get(platform, ""), "").strip():
