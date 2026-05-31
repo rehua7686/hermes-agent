@@ -597,6 +597,19 @@ def cache_media_from_bytes(data: bytes, ext: str = ".bin") -> str:
     return str(file_path.absolute())
 
 
+def cache_image_from_bytes(data: bytes, ext: str = ".jpg") -> str:
+    """
+    Save raw image bytes to the cache and return the absolute file path.
+    """
+    if not _looks_like_image(data):
+        snippet = data[:80].decode("utf-8", errors="replace")
+        raise ValueError(
+            f"Refusing to cache non-image data as {ext} "
+            f"(starts with: {snippet!r})"
+        )
+    return cache_media_from_bytes(data, ext=ext)
+
+
 async def cache_media_from_url(url: str, ext: str = ".bin", retries: int = 2) -> str:
     """
     Download media from a URL and save it to the local cache.
