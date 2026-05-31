@@ -105,7 +105,11 @@ export function useSubmission(opts: UseSubmissionOptions) {
 
         patchUiState({ busy: true, status: 'running…' })
         turnController.bufRef = ''
-        turnController.interrupted = false
+        // NOTE: do NOT reset turnController.interrupted here.
+        // startMessage() (fired by gateway's message.start event) resets it.
+        // If we clear it now, a stale message.complete from the interrupted
+        // turn arrives with wasInterrupted=false and re-appends its partial
+        // response — doubling.  See #doubling-race.
 
         gw.request<PromptSubmitResponse>('prompt.submit', { session_id: sid, text: submitText }).catch((e: Error) => {
           if (isSessionBusyError(e)) {
@@ -207,10 +211,10 @@ export function useSubmission(opts: UseSubmissionOptions) {
       if (hasInterpolation(text)) {
         patchUiState({ busy: true })
 
-        return interpolate(text, send)
+        return interpolate(text, (t: string) => send(t, false))
       }
 
-      send(text)
+      send(text, false)
     },
     [interpolate, send, shellExec]
   )
@@ -261,13 +265,30 @@ export function useSubmission(opts: UseSubmissionOptions) {
       }
 
       // 'interrupt' (default): tear down the current turn, then send.
-      // `interruptTurn` fires `session.interrupt` without awaiting; if
-      // the gateway is still mid-response when `prompt.submit` lands,
-      // `send()`'s catch path re-queues with a "queued: ..." sys note
-      // (`isSessionBusyError`) — so a lost race degrades to queue
-      // semantics, not a dropped message.
+      // Await `session.interrupt` so the gateway has processed the cancel
+      // before we fire `prompt.submit` — otherwise the submit hits
+      // "session busy" and the message gets queued instead of going through.
       if (live.sid) {
-        turnController.interruptTurn({ appendMessage, gw, sid: live.sid, sys })
+        const interruptDone = turnController.interruptTurn({ appendMessage, gw, sid: live.sid, sys })
+
+        patchUiState({ busy: true, status: 'interrupting…' })
+
+        interruptDone
+          .then(() => {
+            if (hasInterpolation(full)) {
+              return interpolate(full, send)
+            }
+
+            send(full)
+          })
+          .catch(() => {
+            // Gateway unreachable or timed out — fall back to queue
+            composerActions.enqueue(full)
+            patchUiState({ busy: true, status: 'queued for next turn' })
+            sys(`queued: "${full.slice(0, 50)}${full.length > 50 ? '…' : ''}"`)
+          })
+
+        return
       }
 
       if (hasInterpolation(full)) {

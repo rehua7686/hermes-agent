@@ -13,10 +13,10 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
-from hermes_constants import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
+from hermes_constants import get_hermes_home
 from utils import is_truthy_value
 from tui_gateway.transport import (
     StdioTransport,
@@ -134,6 +134,155 @@ except (ValueError, TypeError):
 _SLASH_WORKER_TIMEOUT_S = max(5.0, _slash_timeout)
 _DETAIL_SECTION_NAMES = ("thinking", "tools", "subagents", "activity")
 _DETAIL_MODES = frozenset({"hidden", "collapsed", "expanded"})
+# ── Kanban→TUI notification bridge ──────────────────────────────
+# The gateway's _kanban_notifier_watcher delivers terminal kanban events
+# via the TUI platform adapter, which POSTs them to a local HTTP
+# endpoint on the TUI server.  The endpoint dispatches events directly
+# to active sessions — event-driven, no polling, no queues, no files.
+
+
+def _format_kanban_event(ev, task_id: str) -> "str | None":
+    """Format a kanban event into an ``[IMPORTANT: ...]`` message.
+
+    Uses upstream's Event object attributes (``ev.kind``, ``ev.payload``).
+    """
+    kind = ev.kind if hasattr(ev, "kind") else ev.get("kind", "")
+    payload = ev.payload if hasattr(ev, "payload") else (ev.get("payload") or {})
+    if payload is None:
+        payload = {}
+
+    if kind == "completed":
+        handoff = ""
+        if payload.get("summary"):
+            h = str(payload["summary"]).strip().splitlines()[0][:200]
+            handoff = f"\n{h}"
+        return f"[IMPORTANT: Kanban task {task_id} done{handoff}]"
+    elif kind == "blocked":
+        reason = ""
+        if payload.get("reason"):
+            reason = f": {str(payload['reason'])[:160]}"
+        return f"[IMPORTANT: Kanban task {task_id} blocked{reason}]"
+    elif kind == "crashed":
+        return (
+            f"[IMPORTANT: Kanban task {task_id} worker crashed;"
+            " dispatcher will retry]"
+        )
+    elif kind == "timed_out":
+        limit = int(payload.get("limit_seconds", 0)) if payload else 0
+        return (
+            f"[IMPORTANT: Kanban task {task_id} timed out"
+            f" (max_runtime={limit}s); will retry]"
+        )
+    elif kind == "gave_up":
+        err = ""
+        if payload.get("error"):
+            err = f"\n{str(payload['error'])[:200]}"
+        return (
+            f"[IMPORTANT: Kanban task {task_id} gave up after"
+            f" repeated spawn failures{err}]"
+        )
+    return None
+
+
+def _format_kanban_event_from_payload(
+    kind: str, task_id: str, payload: dict,
+) -> "str | None":
+    """Format a kanban event from raw kind/payload into ``[IMPORTANT: ...]``.
+
+    Same logic as _format_kanban_event but takes raw values instead of
+    an Event object.  Used for events pushed through the completion_queue
+    by _notify_kanban_event in kanban_db.py.
+    """
+    if kind == "completed":
+        handoff = ""
+        if payload.get("summary"):
+            h = str(payload["summary"]).strip().splitlines()[0][:200]
+            handoff = f"\n{h}"
+        return f"[IMPORTANT: Kanban task {task_id} done{handoff}]"
+    elif kind == "blocked":
+        reason = ""
+        if payload.get("reason"):
+            reason = f": {str(payload['reason'])[:160]}"
+        return f"[IMPORTANT: Kanban task {task_id} blocked{reason}]"
+    elif kind == "crashed":
+        return (
+            f"[IMPORTANT: Kanban task {task_id} worker crashed;"
+            " dispatcher will retry]"
+        )
+    elif kind == "timed_out":
+        limit = int(payload.get("limit_seconds", 0)) if payload else 0
+        return (
+            f"[IMPORTANT: Kanban task {task_id} timed out"
+            f" (max_runtime={limit}s); will retry]"
+        )
+    elif kind == "gave_up":
+        err = ""
+        if payload.get("error"):
+            err = f"\n{str(payload['error'])[:200]}"
+        return (
+            f"[IMPORTANT: Kanban task {task_id} gave up after"
+            f" repeated spawn failures{err}]"
+        )
+    return None
+
+
+# Kanban→TUI delivery bridge: events from the gateway's TUI adapter
+# are dispatched directly to active sessions via push_kanban_event.
+
+
+def push_kanban_event(task_id: str, kind: str, payload: dict) -> None:
+    """Receive a kanban event from the gateway's TUI adapter.
+
+    Called by TUIAdapter delivery callback when the gateway's
+    _kanban_notifier_watcher delivers a terminal kanban event.
+    Dispatches directly to all active TUI sessions (event-driven,
+    no polling, no queues).
+    """
+    for _sid, _session in list(_sessions.items()):
+        try:
+            _dispatch_kanban_to_session(_sid, _session, task_id, kind, payload)
+        except Exception:
+            pass
+
+
+def _on_process_event(evt: dict) -> None:
+    """Event-driven handler for process_registry completion events.
+
+    Registered as process_registry._completion_callback at session init.
+    Dispatches completion/watch events directly to active sessions.
+    """
+    evt_type = evt.get("type", "")
+    if evt_type == "kanban_event":
+        push_kanban_event(
+            evt.get("task_id", ""),
+            evt.get("kind", ""),
+            evt.get("payload") or {},
+        )
+        return
+    # For non-kanban events (completion, watch_match, etc.), dispatch
+    # to all active sessions as status updates.
+    from tools.process_registry import format_process_notification
+    text = format_process_notification(evt)
+    if not text:
+        return
+    for _sid, _session in list(_sessions.items()):
+        try:
+            with _session["history_lock"]:
+                if _session.get("running"):
+                    _session.setdefault("_pending_kanban", []).append(text)
+                    _emit("status.update", _sid, {"kind": "process", "text": text})
+                    continue
+                _session["running"] = True
+            _rid = f"__notif__{int(time.time() * 1000)}"
+            try:
+                _emit("message.start", _sid)
+                _run_prompt_submit(_rid, _sid, _session, text)
+            except Exception:
+                with _session["history_lock"]:
+                    _session["running"] = False
+        except Exception:
+            pass
+
 
 # ── Async RPC dispatch (#12546) ──────────────────────────────────────
 # A handful of handlers block the dispatcher loop in entry.py for seconds
@@ -150,6 +299,7 @@ _LONG_HANDLERS = frozenset(
         "cli.exec",
         "session.branch",
         "session.compress",
+        "session.interrupt",
         "session.resume",
         "shell.exec",
         "skills.manage",
@@ -185,10 +335,11 @@ class _SlashWorker:
     """Persistent HermesCLI subprocess for slash commands."""
 
     def __init__(self, session_key: str, model: str):
-        self._lock = threading.Lock()
+        self._write_lock = threading.Lock()   # serialises stdin writes
+        self._resp_lock = threading.Lock()    # protects _responses dict
         self._seq = 0
         self.stderr_tail: list[str] = []
-        self.stdout_queue: queue.Queue[dict | None] = queue.Queue()
+        self._responses: dict[int, queue.Queue] = {}
 
         argv = [
             sys.executable,
@@ -216,10 +367,19 @@ class _SlashWorker:
     def _drain_stdout(self):
         for line in self.proc.stdout or []:
             try:
-                self.stdout_queue.put(json.loads(line))
+                msg = json.loads(line)
             except json.JSONDecodeError:
                 continue
-        self.stdout_queue.put(None)
+            rid = msg.get("id")
+            if rid is not None:
+                with self._resp_lock:
+                    q = self._responses.get(rid)
+                if q is not None:
+                    q.put(msg)
+        # Pipe closed — wake every waiter so they see the EOF.
+        with self._resp_lock:
+            for q in self._responses.values():
+                q.put(None)
 
     def _drain_stderr(self):
         for line in self.proc.stderr or []:
@@ -230,21 +390,24 @@ class _SlashWorker:
         if self.proc.poll() is not None:
             raise RuntimeError("slash worker exited")
 
-        with self._lock:
+        # Per-request queue: drain_stdout routes by id into this queue.
+        rq: queue.Queue = queue.Queue()
+        with self._write_lock:
             self._seq += 1
             rid = self._seq
+            with self._resp_lock:
+                self._responses[rid] = rq
             self.proc.stdin.write(json.dumps({"id": rid, "command": command}) + "\n")
             self.proc.stdin.flush()
 
+        try:
             while True:
                 try:
-                    msg = self.stdout_queue.get(timeout=_SLASH_WORKER_TIMEOUT_S)
+                    msg = rq.get(timeout=_SLASH_WORKER_TIMEOUT_S)
                 except queue.Empty:
                     raise RuntimeError("slash worker timed out")
                 if msg is None:
                     break
-                if msg.get("id") != rid:
-                    continue
                 if not msg.get("ok"):
                     raise RuntimeError(msg.get("error", "slash worker failed"))
                 return str(msg.get("output", "")).rstrip()
@@ -252,6 +415,9 @@ class _SlashWorker:
             raise RuntimeError(
                 f"slash worker closed pipe{': ' + chr(10).join(self.stderr_tail[-8:]) if self.stderr_tail else ''}"
             )
+        finally:
+            with self._resp_lock:
+                self._responses.pop(rid, None)
 
     def close(self):
         try:
@@ -565,7 +731,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
             try:
                 worker = _SlashWorker(key, getattr(agent, "model", _resolve_model()))
                 current["slash_worker"] = worker
-            except Exception:
+            except (OSError, ImportError):
                 pass
 
             try:
@@ -579,11 +745,14 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 )
                 notify_registered = True
                 load_permanent_allowlist()
-            except Exception:
+            except ImportError:
                 pass
 
             _wire_callbacks(sid)
-            _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
+            _sessions[sid]["_notif_stop"] = threading.Event()
+            # Register event-driven callback for process completions
+            from tools.process_registry import process_registry
+            process_registry._completion_callback = _on_process_event
             _notify_session_boundary("on_session_reset", key)
 
             info = _session_info(agent)
@@ -595,6 +764,19 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 info["config_warning"] = cfg_warn
                 logger.warning(cfg_warn)
             _emit("session.info", sid, info)
+            # Ensure loop manager for this session (idempotent).
+            # The slash_worker persisted state to SessionDB; this
+            # LoopManager with TUI dispatch picks up the ticking.
+            if "_loop_manager" not in current:
+                try:
+                    from hermes_cli.loop import LoopManager
+                    lk = current.get("session_key") or sid
+                    current["_loop_manager"] = LoopManager(
+                        session_id=lk,
+                        dispatch=_make_tui_dispatch(current, sid),
+                    )
+                except ImportError:
+                    pass
         except Exception as e:
             current["agent_error"] = str(e)
             _emit("error", sid, {"message": f"agent init failed: {e}"})
@@ -615,6 +797,28 @@ def _start_agent_build(sid: str, session: dict) -> None:
             ready.set()
 
     threading.Thread(target=_build, daemon=True).start()
+
+
+def _make_tui_dispatch(session: dict, sid: str) -> Callable[[str], bool]:
+    """Return a dispatch callback that injects loop prompts via _run_prompt_submit.
+
+    The callback returns True if the prompt was submitted, False if the
+    session is busy and the ticker should retry next tick.
+    """
+    def _dispatch(prompt: str) -> bool:
+        with session["history_lock"]:
+            if session.get("running"):
+                return False
+            session["running"] = True
+        try:
+            _emit("message.start", sid)
+            _run_prompt_submit(None, sid, session, prompt)
+            return True
+        except Exception:
+            with session["history_lock"]:
+                session["running"] = False
+            return False
+    return _dispatch
 
 
 def _sess_nowait(params, rid):
@@ -674,7 +878,7 @@ def _load_cfg() -> dict:
             _cfg_mtime = mtime
             _cfg_path = p
         return data
-    except Exception:
+    except (FileNotFoundError, yaml.YAMLError, TypeError):
         pass
     return {}
 
@@ -691,7 +895,7 @@ def _save_cfg(cfg: dict):
         _cfg_path = path
         try:
             _cfg_mtime = path.stat().st_mtime
-        except Exception:
+        except OSError:
             _cfg_mtime = None
 
 
@@ -700,7 +904,7 @@ def _set_session_context(session_key: str) -> list:
         from gateway.session_context import set_session_vars
 
         return set_session_vars(session_key=session_key)
-    except Exception:
+    except ImportError:
         return []
 
 
@@ -711,7 +915,7 @@ def _clear_session_context(tokens: list) -> None:
         from gateway.session_context import clear_session_vars
 
         clear_session_vars(tokens)
-    except Exception:
+    except ImportError:
         pass
 
 
@@ -773,7 +977,7 @@ def resolve_skin() -> dict:
             "tool_prefix": skin.tool_prefix,
             "help_header": (skin.branding or {}).get("help_header", ""),
         }
-    except Exception:
+    except (ImportError, AttributeError):
         return {}
 
 
@@ -822,7 +1026,7 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
         if detected:
             provider, detected_model = detected
             return detected_model, provider
-    except Exception:
+    except (ImportError, ValueError):
         pass
     return model, None
 
@@ -946,7 +1150,7 @@ def _load_enabled_toolsets() -> list[str] | None:
 
     try:
         from toolsets import validate_toolset
-    except Exception:
+    except ImportError:
         validate_toolset = None
 
     if explicit and validate_toolset is not None:
@@ -959,7 +1163,7 @@ def _load_enabled_toolsets() -> list[str] | None:
 
                 discover_plugins()
                 plugin_valid = [name for name in unresolved if validate_toolset(name)]
-            except Exception:
+            except ImportError:
                 plugin_valid = []
 
             if plugin_valid:
@@ -999,7 +1203,7 @@ def _load_enabled_toolsets() -> list[str] | None:
                     mcp_names.add(str(name))
                 else:
                     mcp_disabled.add(str(name))
-        except Exception:
+        except (FileNotFoundError, json.JSONDecodeError):
             mcp_names = set()
             mcp_disabled = set()
 
@@ -1052,7 +1256,7 @@ def _load_enabled_toolsets() -> list[str] | None:
         if fallback_notice is not None:
             print(fallback_notice, file=sys.stderr, flush=True)
         return enabled or None
-    except Exception:
+    except (ImportError, FileNotFoundError, RuntimeError):
         if fallback_notice is not None:
             print(
                 "[tui] no valid HERMES_TUI_TOOLSETS entries and configured CLI toolsets could not be loaded; enabling all toolsets",
@@ -1087,6 +1291,7 @@ def _restart_slash_worker(session: dict):
             getattr(session.get("agent"), "model", _resolve_model()),
         )
     except Exception:
+        logger.warning("Failed to create slash worker", exc_info=True)
         session["slash_worker"] = None
 
 
@@ -1148,7 +1353,7 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
         cfg = load_config()
         user_provs = cfg.get("providers")
         custom_provs = get_compatible_custom_providers(cfg)
-    except Exception:
+    except (ImportError, FileNotFoundError):
         pass
 
     result = switch_model(
@@ -1290,12 +1495,12 @@ def _sync_session_key_after_compress(
 
         try:
             unregister_gateway_notify(old_key)
-        except Exception:
+        except KeyError:
             pass
         session["session_key"] = new_session_id
         try:
             yolo_was_on = is_session_yolo_enabled(old_key)
-        except Exception:
+        except (ImportError, KeyError):
             yolo_was_on = False
         if yolo_was_on:
             try:
@@ -1308,7 +1513,7 @@ def _sync_session_key_after_compress(
                 new_session_id,
                 lambda data: _emit("approval.request", sid, data),
             )
-        except Exception:
+        except ImportError:
             pass
     except Exception:
         # Even if the approval module fails to import, still anchor the
@@ -1365,7 +1570,7 @@ def _get_usage(agent) -> dict:
         usage["cost_status"] = cost.status
         if cost.amount_usd is not None:
             usage["cost_usd"] = float(cost.amount_usd)
-    except Exception:
+    except (AttributeError, ImportError):
         pass
     return usage
 
@@ -1377,7 +1582,7 @@ def _probe_credentials(agent) -> str:
         provider = getattr(agent, "provider", "") or ""
         if not key or key == "no-key-required":
             return f"No API key configured for provider '{provider}'. First message will fail."
-    except Exception:
+    except AttributeError:
         pass
     return ""
 
@@ -1420,7 +1625,7 @@ def _current_profile_name() -> str:
         from hermes_cli.profiles import get_active_profile_name
 
         return get_active_profile_name() or "default"
-    except Exception:
+    except ImportError:
         return "default"
 
 
@@ -1453,7 +1658,7 @@ def _session_info(agent) -> dict:
 
         info["version"] = __version__
         info["release_date"] = __release_date__
-    except Exception:
+    except (ImportError, AttributeError):
         pass
     try:
         from model_tools import get_toolset_for_tool
@@ -1463,23 +1668,26 @@ def _session_info(agent) -> dict:
             info["tools"].setdefault(get_toolset_for_tool(name) or "other", []).append(
                 name
             )
-    except Exception:
+    except (ImportError, AttributeError):
         pass
     try:
         from hermes_cli.banner import get_available_skills
 
         info["skills"] = get_available_skills()
     except Exception:
+        logger.debug("Failed to load available skills", exc_info=True)
         pass
     try:
         from tools.mcp_tool import get_mcp_status
 
         info["mcp_servers"] = get_mcp_status()
     except Exception:
+        logger.debug("Failed to get MCP status", exc_info=True)
         info["mcp_servers"] = []
     try:
         info["system_prompt"] = getattr(agent, "_cached_system_prompt", "") or ""
     except Exception:
+        logger.debug("Failed to get system prompt", exc_info=True)
         pass
     try:
         from hermes_cli.banner import get_update_result
@@ -1488,6 +1696,7 @@ def _session_info(agent) -> dict:
         info["update_behind"] = get_update_result(timeout=0.5)
         info["update_command"] = recommended_update_command()
     except Exception:
+        logger.debug("Failed to get update info", exc_info=True)
         pass
     return info
 
@@ -1497,7 +1706,7 @@ def _tool_ctx(name: str, args: dict) -> str:
         from agent.display import build_tool_preview
 
         return build_tool_preview(name, args, max_len=80) or ""
-    except Exception:
+    except (ImportError, AttributeError):
         return ""
 
 
@@ -1547,6 +1756,7 @@ def _redact_tui_verbose_text(text: str) -> str:
 
         redacted = redact_sensitive_text(str(text), force=True)
     except Exception:
+        logger.warning("Redaction failed — sensitive data may leak", exc_info=True)
         return ""
     return _cap_tui_verbose_text(redacted)
 
@@ -1555,6 +1765,7 @@ def _tool_args_text(args: dict) -> str:
     try:
         raw = json.dumps(args or {}, indent=2, ensure_ascii=False, default=str)
     except Exception:
+        logger.debug("JSON serialization failed for tool args", exc_info=True)
         raw = str(args or {})
     return _redact_tui_verbose_text(raw)
 
@@ -1565,6 +1776,7 @@ def _tool_result_text(result: object) -> str:
 
         raw = _multimodal_text_summary(result)
     except Exception:
+        logger.debug("Multimodal text summary failed", exc_info=True)
         raw = str(result)
     return _redact_tui_verbose_text(raw)
 
@@ -1593,6 +1805,7 @@ def _tool_summary(name: str, result: str, duration_s: float | None) -> str | Non
     try:
         data = json.loads(result)
     except Exception:
+        logger.debug("JSON parse failed for tool summary", exc_info=True)
         data = None
 
     dur = _fmt_tool_duration(duration_s)
@@ -1627,6 +1840,7 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
             if snapshot is not None:
                 session.setdefault("edit_snapshots", {})[tool_call_id] = snapshot
         except Exception:
+            logger.debug("capture_local_edit_snapshot failed", exc_info=True)
             pass
         session.setdefault("tool_started_at", {})[tool_call_id] = time.time()
     if _tool_progress_enabled(sid):
@@ -1668,6 +1882,7 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
             if isinstance(data, dict) and isinstance(data.get("todos"), list):
                 payload["todos"] = data.get("todos")
         except Exception:
+            logger.debug("todo result parse failed", exc_info=True)
             pass
     try:
         from agent.display import render_edit_diff_with_delta
@@ -1682,6 +1897,7 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
         ):
             payload["inline_diff"] = "\n".join(rendered)
     except Exception:
+        logger.debug("render_edit_diff_with_delta failed", exc_info=True)
         pass
     if _tool_progress_enabled(sid) or payload.get("inline_diff"):
         _emit("tool.complete", sid, payload)
@@ -1841,11 +2057,13 @@ def _available_personalities(cfg: dict | None = None) -> dict:
 
         return (load_cli_config().get("agent") or {}).get("personalities", {}) or {}
     except Exception:
+        logger.debug("load_cli_config failed for personalities", exc_info=True)
         try:
             from hermes_cli.config import load_config as _load_full_cfg
 
             return (_load_full_cfg().get("agent") or {}).get("personalities", {}) or {}
         except Exception:
+            logger.debug("load_config failed for personalities", exc_info=True)
             cfg = cfg or _load_cfg()
             return (cfg.get("agent") or {}).get("personalities", {}) or {}
 
@@ -1992,6 +2210,7 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
     session["show_reasoning"] = _load_show_reasoning()
     session["tool_progress_mode"] = _load_tool_progress_mode()
     session["tool_started_at"] = {}
+    session["_pending_kanban"] = []
     with session["history_lock"]:
         session["history"] = []
         session["history_version"] = int(session.get("history_version", 0)) + 1
@@ -2091,6 +2310,7 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
         "tool_progress_mode": _load_tool_progress_mode(),
         "edit_snapshots": {},
         "tool_started_at": {},
+        "_pending_kanban": [],
         # Pin async event emissions to whichever transport created the
         # session (stdio for Ink, JSON-RPC WS for the dashboard sidebar).
         "transport": current_transport() or _stdio_transport,
@@ -2100,6 +2320,7 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
             key, getattr(agent, "model", _resolve_model())
         )
     except Exception:
+        logger.warning("Failed to create slash worker on session start", exc_info=True)
         # Defer hard-failure to slash.exec; chat still works without slash worker.
         _sessions[sid]["slash_worker"] = None
     try:
@@ -2108,6 +2329,7 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
         register_gateway_notify(key, lambda data: _emit("approval.request", sid, data))
         load_permanent_allowlist()
     except Exception:
+        logger.debug("Approval registration failed on session start", exc_info=True)
         pass
     # Surface the self-improvement background review's "💾 …" summary as a
     # review.summary event so Ink can render it as a persistent system line
@@ -2119,11 +2341,15 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
             "review.summary", _sid, {"text": str(message)}
         )
     except Exception:
+        logger.debug("background_review_callback not available on agent", exc_info=True)
         # Bare AIAgents that don't expose the attribute (unlikely, but keep
         # session startup resilient).
         pass
     _wire_callbacks(sid)
-    _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
+    _sessions[sid]["_notif_stop"] = threading.Event()
+    # Register event-driven callback for process completions
+    from tools.process_registry import process_registry
+    process_registry._completion_callback = _on_process_event
     _notify_session_boundary("on_session_reset", key)
     _emit("session.info", sid, _session_info(agent))
 
@@ -2149,7 +2375,8 @@ def _resolve_checkpoint_hash(mgr, cwd: str, ref: str) -> str:
 
 def _enrich_with_attached_images(user_text: str, image_paths: list[str]) -> str:
     """Pre-analyze attached images via vision and prepend descriptions to user text."""
-    import asyncio, json as _json
+    import asyncio
+    import json as _json
     from tools.vision_tools import vision_analyze_tool
 
     prompt = (
@@ -2175,6 +2402,7 @@ def _enrich_with_attached_images(user_text: str, image_paths: list[str]) -> str:
                 else f"[The user attached an image but analysis failed.]\n{hint}"
             )
         except Exception:
+            logger.warning("Image analysis failed", exc_info=True)
             parts.append(f"[The user attached an image but analysis failed.]\n{hint}")
 
     text = user_text or ""
@@ -2704,6 +2932,7 @@ def _(rid, params: dict) -> dict:
             elif resolved_title:
                 session["pending_title"] = None
         except Exception:
+            logger.debug("Title resolution failed", exc_info=True)
             resolved_title = fallback
         return _ok(
             rid,
@@ -2771,6 +3000,7 @@ def _(rid, params: dict) -> dict:
         try:
             meta = db.get_session(key) or {}
         except Exception:
+            logger.debug("session.info DB read failed", exc_info=True)
             meta = {}
 
     def _dt(value, fallback: datetime | None = None) -> datetime:
@@ -2778,6 +3008,7 @@ def _(rid, params: dict) -> dict:
             try:
                 return datetime.fromtimestamp(float(value))
             except Exception:
+                logger.debug("Timestamp parse failed", exc_info=True)
                 pass
         return fallback or datetime.now()
 
@@ -2825,6 +3056,7 @@ def _(rid, params: dict) -> dict:
                 session["session_key"], include_ancestors=True
             )
         except Exception:
+            logger.warning("session.history DB read failed", exc_info=True)
             pass
     return _ok(
         rid,
@@ -3083,6 +3315,15 @@ def _(rid, params: dict) -> dict:
         resolve_gateway_approval(session["session_key"], "deny", resolve_all=True)
     except Exception:
         pass
+    # Wait for the agent loop to actually finish before returning.
+    # Without this, prompt.submit fires immediately after interrupt and
+    # hits "session busy" because session["running"] is still True — the
+    # agent hasn't had time to check _interrupt_requested and exit.
+    for _ in range(100):  # up to 5s
+        with session["history_lock"]:
+            if not session.get("running"):
+                break
+        time.sleep(0.05)
     return _ok(rid, {"status": "interrupted"})
 
 
@@ -3268,6 +3509,7 @@ def _(rid, params: dict) -> dict:
                 try:
                     raw = json.loads(p.read_text(encoding="utf-8"))
                 except Exception:
+                    logger.warning("Subagent state JSON read failed", exc_info=True)
                     raw = {}
                 subagents = raw.get("subagents") or []
                 entries.append(
@@ -3385,103 +3627,119 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"status": "streaming"})
 
 
-def _notification_poller_loop(
-    stop_event: threading.Event, sid: str, session: dict
-) -> None:
-    """Poll completion_queue and dispatch notifications autonomously.
-
-    Runs in a daemon thread started by _init_session(). Emits a
-    status.update (kind=process) for user visibility, then chains an
-    agent turn via _run_prompt_submit if the session is idle.
-
-    NOTE: The completion_queue is global (one per process). If multiple
-    TUI sessions coexist, whichever poller wakes first grabs the event,
-    even if the process was started by a different session. This matches
-    CLI/gateway behavior (single session per process).
-    """
-    from tools.process_registry import process_registry, format_process_notification
-
-    while not stop_event.is_set() and not session.get("_finalized"):
-        try:
-            evt = process_registry.completion_queue.get(timeout=0.5)
-        except Exception:
-            continue
-
-        _evt_sid = evt.get("session_id", "")
-        if evt.get("type") == "completion" and process_registry.is_completion_consumed(_evt_sid):
-            continue
-
-        text = format_process_notification(evt)
-        if not text:
-            continue
-
-        _emit("status.update", sid, {"kind": "process", "text": text})
-
+def _dispatch_kanban_to_session(sid: str, session: dict, task_id: str, kind: str, payload: dict) -> None:
+    """Dispatch a kanban event to a TUI session (event-driven, no polling)."""
+    _msg = _format_kanban_event_from_payload(kind, task_id, payload or {})
+    if not _msg:
+        return
+    with session["history_lock"]:
+        if session.get("running"):
+            session.setdefault("_pending_kanban", []).append(_msg)
+            _emit("status.update", sid, {"kind": "process", "text": _msg})
+            return
+        session["running"] = True
+    _rid = f"__kanban__{int(time.time() * 1000)}"
+    try:
+        _emit("message.start", sid)
+        _run_prompt_submit(_rid, sid, session, _msg)
+    except Exception:
         with session["history_lock"]:
-            if session.get("running"):
-                process_registry.completion_queue.put(evt)
-                continue
-            session["running"] = True
-
-        rid = f"__notif__{int(time.time() * 1000)}"
-        try:
-            _emit("message.start", sid)
-            _run_prompt_submit(rid, sid, session, text)
-        except Exception as exc:
-            print(
-                f"[tui_gateway] notification poller dispatch failed: "
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-            with session["history_lock"]:
-                session["running"] = False
-
-    # Drain any remaining events after stop signal (process all pending
-    # before exiting so nothing is lost on shutdown).
-    while not process_registry.completion_queue.empty():
-        try:
-            evt = process_registry.completion_queue.get_nowait()
-        except Exception:
-            break
-        _evt_sid = evt.get("session_id", "")
-        if evt.get("type") == "completion" and process_registry.is_completion_consumed(_evt_sid):
-            continue
-        text = format_process_notification(evt)
-        if not text:
-            continue
-
-        _emit("status.update", sid, {"kind": "process", "text": text})
-
-        with session["history_lock"]:
-            if session.get("running"):
-                process_registry.completion_queue.put(evt)
-                break
-            session["running"] = True
-
-        rid = f"__notif__{int(time.time() * 1000)}"
-        try:
-            _emit("message.start", sid)
-            _run_prompt_submit(rid, sid, session, text)
-        except Exception as exc:
-            print(
-                f"[tui_gateway] notification poller dispatch failed: "
-                f"{type(exc).__name__}: {exc}",
-                file=sys.stderr,
-            )
-            with session["history_lock"]:
-                session["running"] = False
+            session["running"] = False
 
 
-def _start_notification_poller(sid: str, session: dict) -> threading.Event:
-    """Start the background notification poller for a TUI session."""
-    stop = threading.Event()
-    t = threading.Thread(
-        target=_notification_poller_loop,
-        args=(stop, sid, session),
-        daemon=True,
-    )
+# ── HTTP notification endpoint ───────────────────────────────────
+# The gateway's TUIAdapter POSTs kanban events to this endpoint.
+# Events are dispatched directly to active sessions — no polling.
+
+_NOTIF_HTTP_PORT: int = 0
+_NOTIF_HTTP_STARTED = False
+
+
+def _handle_notification_post(body: dict) -> None:
+    """Dispatch a notification event received via HTTP POST."""
+    content = body.get("content", "")
+    metadata = body.get("metadata", {})
+    task_id = metadata.get("task_id", "")
+    kind = metadata.get("kind", "completed")
+    payload = metadata.get("payload", {})
+
+    if not content:
+        return
+
+    if task_id:
+        for _sid, _session in list(_sessions.items()):
+            try:
+                _dispatch_kanban_to_session(
+                    _sid, _session, task_id, kind, payload,
+                )
+            except Exception:
+                pass
+    else:
+        for _sid, _session in list(_sessions.items()):
+            try:
+                with _session["history_lock"]:
+                    if _session.get("running"):
+                        _session.setdefault("_pending_kanban", []).append(content)
+                        _emit("status.update", _sid,
+                              {"kind": "process", "text": content})
+                        continue
+                    _session["running"] = True
+                _rid = f"__notif__{int(time.time() * 1000)}"
+                try:
+                    _emit("message.start", _sid)
+                    _run_prompt_submit(_rid, _sid, _session, content)
+                except Exception:
+                    with _session["history_lock"]:
+                        _session["running"] = False
+            except Exception:
+                pass
+
+
+def _start_notification_http() -> None:
+    """Start a minimal HTTP server for gateway→TUI notification delivery."""
+    global _NOTIF_HTTP_PORT, _NOTIF_HTTP_STARTED
+    if _NOTIF_HTTP_STARTED:
+        return
+    _NOTIF_HTTP_STARTED = True
+
+    import socket
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length) if length else b""
+            try:
+                import json as _json
+                data = _json.loads(body)
+                _handle_notification_post(data)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+            except Exception as exc:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(str(exc).encode())
+
+        def log_message(self, *args):
+            pass  # suppress stderr logging
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    _NOTIF_HTTP_PORT = server.server_address[1]
+
+    # Write port to file so the gateway's TUIAdapter can find it.
+    _port_file = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes") / "tui_notify_port"
+    try:
+        _port_file.write_text(str(_NOTIF_HTTP_PORT))
+    except OSError:
+        pass
+
+    t = threading.Thread(target=server.serve_forever, name="notif-http", daemon=True)
     t.start()
-    return stop
+
+
+# Auto-start on module import.
+_start_notification_http()
 
 
 def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
@@ -3707,6 +3965,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                             goals_cfg = _load_cfg().get("goals") or {}
                             goal_max_turns = int(goals_cfg.get("max_turns", 20) or 20)
                         except Exception:
+                            logger.debug("Goals config load failed", exc_info=True)
                             goal_max_turns = 20
                         goal_mgr = GoalManager(
                             session_id=sid_key,
@@ -3753,6 +4012,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                             _session_key, exc,
                         )
                     except Exception:
+                        logger.debug("Pending title DB save failed", exc_info=True)
                         # Transient DB failure — keep pending_title for retry.
                         pass
 
@@ -3774,6 +4034,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                         session.get("history", []),
                     )
                 except Exception:
+                    logger.debug("Auto-title generation failed", exc_info=True)
                     pass
 
             # CLI parity: when voice-mode TTS is on, speak the agent reply
@@ -3820,6 +4081,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 if approval_token is not None:
                     reset_current_session_key(approval_token)
             except Exception:
+                logger.debug("Approval token reset failed", exc_info=True)
                 pass
             _clear_session_context(session_tokens)
             with session["history_lock"]:
@@ -3852,17 +4114,43 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 with session["history_lock"]:
                     session["running"] = False
 
+        # Drain pending kanban notifications that were queued while the
+        # session was busy.  Batch ALL pending into a single combined
+        # message so one user-message mid-drain doesn't orphan the rest.
+        with session["history_lock"]:
+            _pending = session.get("_pending_kanban", [])
+            if _pending and not session.get("running"):
+                _batch = "\n\n".join(_pending)
+                _pending.clear()
+                session["running"] = True
+            else:
+                _batch = None
+        if _batch:
+            try:
+                _emit("message.start", sid)
+                _run_prompt_submit(rid, sid, session, _batch)
+            except Exception as _pk_exc:
+                print(
+                    f"[tui_gateway] pending kanban dispatch failed: "
+                    f"{type(_pk_exc).__name__}: {_pk_exc}",
+                    file=sys.stderr,
+                )
+                with session["history_lock"]:
+                    session["running"] = False
+
         # Drain completion notifications that arrived during this turn.
-        # The background poller handles between-turn delivery; this is
-        # the safety net for events that arrived mid-turn.
+        # Events are delivered via process_registry._completion_callback;
+        # if the session is busy, queue for later dispatch.
         try:
             from tools.process_registry import process_registry
 
             for _evt, synth in process_registry.drain_notifications():
                 with session["history_lock"]:
                     if session.get("running"):
-                        process_registry.completion_queue.put(_evt)
-                        break
+                        session.setdefault("_pending_kanban", []).append(synth)
+                        _emit("status.update", sid,
+                              {"kind": "process", "text": synth})
+                        continue
                     session["running"] = True
                 try:
                     _emit("message.start", sid)
@@ -4628,6 +4916,7 @@ def _(rid, params: dict) -> dict:
                 rid, {"mtime": cfg_path.stat().st_mtime if cfg_path.exists() else 0}
             )
         except Exception:
+            logger.debug("config.mtime stat failed", exc_info=True)
             return _ok(rid, {"mtime": 0})
     return _err(rid, 4002, f"unknown config key: {key}")
 
@@ -4677,6 +4966,7 @@ def _(rid, params: dict) -> dict:
                 if isinstance(_approvals, dict):
                     _confirm_required = bool(_approvals.get("mcp_reload_confirm", True))
             except Exception:
+                logger.debug("MCP reload confirm config load failed", exc_info=True)
                 _confirm_required = True
             if _confirm_required:
                 # Return a structured response the Ink client can surface
@@ -4794,6 +5084,7 @@ _PENDING_INPUT_COMMANDS: frozenset[str] = frozenset(
         "steer",
         "plan",
         "goal",
+        "loop",
     }
 )
 
@@ -4971,6 +5262,7 @@ def _resolve_name(name: str) -> str:
         r = resolve_command(name)
         return r.name if r else name
     except Exception:
+        logger.debug("command.resolve failed", exc_info=True)
         return name
 
 
@@ -5019,6 +5311,7 @@ def _(rid, params: dict) -> dict:
             result = resolve_plugin_command_result(handler(arg))
             return _ok(rid, {"type": "plugin", "output": str(result or "")})
     except Exception:
+        logger.warning("Plugin command handler failed", exc_info=True)
         pass
 
     try:
@@ -5043,6 +5336,7 @@ def _(rid, params: dict) -> dict:
                     },
                 )
     except Exception:
+        logger.warning("Skill command handler failed", exc_info=True)
         pass
 
     # ── Commands that queue messages onto _pending_input in the CLI ───
@@ -5104,6 +5398,7 @@ def _(rid, params: dict) -> dict:
                         },
                     )
             except Exception:
+                logger.debug("Steer command queue failed", exc_info=True)
                 pass
         # Fallback: no active run, treat as next-turn message
         return _ok(rid, {"type": "send", "message": arg})
@@ -5124,6 +5419,7 @@ def _(rid, params: dict) -> dict:
             goals_cfg = _load_cfg().get("goals") or {}
             max_turns = int(goals_cfg.get("max_turns", 20) or 20)
         except Exception:
+            logger.debug("Goal command config load failed", exc_info=True)
             max_turns = 20
         mgr = GoalManager(session_id=sid_key, default_max_turns=max_turns)
 
@@ -5178,6 +5474,94 @@ def _(rid, params: dict) -> dict:
             rid,
             {"type": "send", "notice": notice, "message": state.goal},
         )
+
+    if name == "loop":
+        if not session:
+            return _err(rid, 4001, "no active session")
+        try:
+            from hermes_cli.loop import LoopManager, _parse_loop_command, format_interval
+        except Exception as exc:
+            return _err(rid, 5030, f"loop unavailable: {exc}")
+
+        sid_key = session.get("session_key") or ""
+        if not sid_key:
+            return _err(rid, 4001, "no session key")
+
+        # Use the session's existing loop manager (with TUI dispatch)
+        # or create one if it doesn't exist yet.
+        mgr = session.get("_loop_manager")
+        if mgr is None or getattr(mgr, "session_id", None) != sid_key:
+            mgr = LoopManager(
+                session_id=sid_key,
+                dispatch=_make_tui_dispatch(session, params.get("session_id", "")),
+            )
+            session["_loop_manager"] = mgr
+
+        parsed = _parse_loop_command(arg)
+        action = parsed["action"]
+
+        if action == "status":
+            return _ok(rid, {"type": "exec", "output": mgr.status_line()})
+
+        if action == "pause_all":
+            paused = mgr.pause()
+            if not paused:
+                return _ok(rid, {"type": "exec", "output": "No active loops."})
+            ids = ", ".join(f"#{s.id}" for s in paused)
+            return _ok(rid, {"type": "exec", "output": f"⏸ Paused: {ids}"})
+
+        if action == "pause":
+            paused = mgr.pause(uid=parsed["uid"])
+            if not paused:
+                return _ok(rid, {"type": "exec", "output": f"No loop #{parsed['uid']}."})
+            return _ok(rid, {"type": "exec", "output": f"⏸ Loop #{parsed['uid']} paused: {paused[0].prompt}"})
+
+        if action == "resume_all":
+            resumed = mgr.resume()
+            if not resumed:
+                return _ok(rid, {"type": "exec", "output": "No paused loops."})
+            ids = ", ".join(f"#{s.id}" for s in resumed)
+            return _ok(rid, {"type": "exec", "output": f"▶ Resumed: {ids}"})
+
+        if action == "resume":
+            resumed = mgr.resume(uid=parsed["uid"])
+            if not resumed:
+                return _ok(rid, {"type": "exec", "output": f"No loop #{parsed['uid']}."})
+            return _ok(rid, {"type": "exec", "output": f"▶ Loop #{parsed['uid']} resumed: {resumed[0].prompt}"})
+
+        if action == "clear_all":
+            count = mgr.clear()
+            if count:
+                return _ok(rid, {"type": "exec", "output": f"✓ {count} loop(s) cleared."})
+            return _ok(rid, {"type": "exec", "output": "No active loops."})
+
+        if action == "clear":
+            count = mgr.clear(uid=parsed["uid"])
+            if count:
+                return _ok(rid, {"type": "exec", "output": f"✓ Loop #{parsed['uid']} cleared."})
+            return _ok(rid, {"type": "exec", "output": f"No loop #{parsed['uid']}."})
+
+        if action == "set":
+            try:
+                state = mgr.add(
+                    parsed["prompt"],
+                    interval_seconds=parsed["interval"],
+                )
+            except ValueError as exc:
+                return _err(rid, 4004, f"invalid loop: {exc}")
+
+            interval_str = format_interval(state.interval_seconds)
+            notice = (
+                f"⊙ Loop #{state.id} set: every {interval_str} → {state.prompt}\n"
+                "Controls: /loop list · /loop pause · /loop resume · /loop clear"
+            )
+            return _ok(
+                rid,
+                {"type": "exec", "output": notice},
+            )
+
+        if action == "error":
+            return _err(rid, 4004, parsed.get("message", "invalid /loop command"))
 
     if name in {"snapshot", "snap"}:
         subcommand = arg.split(maxsplit=1)[0].lower() if arg else ""
@@ -5955,6 +6339,7 @@ def _(rid, params: dict) -> dict:
                 rid, 4018, f"skill command: use command.dispatch for {_cmd_key}"
             )
     except Exception:
+        logger.debug("Skill command check failed", exc_info=True)
         pass
 
     plugin_handler = None
@@ -5968,6 +6353,7 @@ def _(rid, params: dict) -> dict:
 
             plugin_handler = get_plugin_command_handler(_cmd_base)
         except Exception:
+            logger.debug("Plugin handler lookup failed", exc_info=True)
             plugin_handler = None
             resolve_plugin_command_result = None
 
@@ -6417,6 +6803,7 @@ def _resolve_browser_cdp_url() -> str:
         if isinstance(browser_cfg, dict):
             return str(browser_cfg.get("cdp_url", "") or "").strip()
     except Exception:
+        logger.debug("Browser CDP URL config read failed", exc_info=True)
         pass
     return ""
 
@@ -6449,6 +6836,7 @@ def _http_ok(url: str, timeout: float) -> bool:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             return 200 <= getattr(resp, "status", 200) < 300
     except Exception:
+        logger.debug("CDP URL probe failed", exc_info=True)
         return False
 
 
@@ -6619,6 +7007,7 @@ def _browser_disconnect(rid) -> dict:
 
             cleanup_all_browsers()
         except Exception:
+            logger.debug("Browser cleanup failed", exc_info=True)
             pass
 
     reap()
