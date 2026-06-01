@@ -509,6 +509,16 @@ class TestIsRetryableError:
         )
         assert _is_retryable_error(err) is True
 
+    def test_503_is_retryable(self):
+        import openai
+        from agent.auxiliary_client import _is_retryable_error
+        response = MagicMock()
+        response.status_code = 503
+        err = openai.APIStatusError(
+            "UNAVAILABLE — high demand", response=response, body={}
+        )
+        assert _is_retryable_error(err) is True
+
     def test_504_gateway_timeout_is_retryable(self):
         import openai
         from agent.auxiliary_client import _is_retryable_error
@@ -553,3 +563,48 @@ class TestWrapWithFailover:
         result_client, result_model = _wrap_with_failover(client, "gpt-4o", "compression")
         assert isinstance(result_client, _FailoverAuxiliaryClient)
         assert result_model == "gpt-4o"
+
+    def test_503_triggers_fallback(self, monkeypatch):
+        """503 server-capacity error on primary triggers a configured fallback."""
+        import openai
+        from agent.auxiliary_client import (
+            _wrap_with_failover,
+            _FailoverAuxiliaryClient,
+            resolve_provider_client,
+        )
+
+        monkeypatch.setattr(
+            "agent.auxiliary_client._get_task_fallback_providers",
+            lambda t: [{"provider": "openrouter", "model": "gpt-4o-mini"}],
+        )
+
+        # Primary client that raises 503
+        primary = MagicMock()
+        response = MagicMock()
+        response.status_code = 503
+        primary.chat.completions.create.side_effect = openai.APIStatusError(
+            "UNAVAILABLE — high demand", response=response, body={}
+        )
+
+        # Fallback client that succeeds
+        fallback_client = MagicMock()
+        expected = MagicMock()
+        fallback_client.chat.completions.create.return_value = expected
+
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(fallback_client, "gpt-4o-mini"),
+        ):
+            wrapped, model = _wrap_with_failover(
+                primary, "gemini-3-flash-preview", "compression"
+            )
+            result = wrapped.chat.completions.create(
+                messages=[{"role": "user", "content": "hello"}]
+            )
+
+        assert result is expected
+        assert wrapped._resolved_model == "gemini-3-flash-preview"
+        # Primary was tried first
+        primary.chat.completions.create.assert_called_once()
+        # Fallback resolved and used
+        fallback_client.chat.completions.create.assert_called_once()
