@@ -35,11 +35,29 @@ from agent.memory_pipeline import (
     SalienceScorer,
     SilentEngramEngine,
 )
+from agent.pipeline.feature_flags import FeatureFlags, _FLAG_NAMES
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _enable_all_feature_flags(monkeypatch):
+    """Enable all v2 feature flags so TDD tests validate the fixed behavior.
+
+    This patches FeatureFlags in agent.memory_pipeline so every ``_ff =
+    FeatureFlags()`` call returns an instance with all flags ON.
+    """
+    _all_on = {name: True for name in _FLAG_NAMES}
+
+    def _all_enabled_cls(config=None):
+        return FeatureFlags(_all_on)
+
+    monkeypatch.setattr(
+        "agent.memory_pipeline.FeatureFlags", _all_enabled_cls,
+    )
+
 
 @pytest.fixture()
 def state(tmp_path, monkeypatch):
