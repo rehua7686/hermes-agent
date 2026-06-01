@@ -46,17 +46,27 @@ from agent.pipeline.feature_flags import FeatureFlags, _FLAG_NAMES
 def _enable_all_feature_flags(monkeypatch):
     """Enable all v2 feature flags so TDD tests validate the fixed behavior.
 
-    This patches FeatureFlags in agent.memory_pipeline so every ``_ff =
-    FeatureFlags()`` call returns an instance with all flags ON.
+    This patches FeatureFlags in every pipeline submodule that uses it,
+    so every ``_ff = FeatureFlags()`` call returns an instance with all
+    flags ON.
     """
     _all_on = {name: True for name in _FLAG_NAMES}
 
     def _all_enabled_cls(config=None):
         return FeatureFlags(_all_on)
 
-    monkeypatch.setattr(
-        "agent.memory_pipeline.FeatureFlags", _all_enabled_cls,
-    )
+    # Patch in every module that holds a FeatureFlags reference
+    _modules_to_patch = [
+        "agent.memory_pipeline",
+        "agent.pipeline.salience",
+        "agent.pipeline.engram",
+        "agent.pipeline.consolidation",
+        "agent.pipeline.reconsolidation",
+        "agent.pipeline.feedback",
+        "agent.pipeline.activation",
+    ]
+    for mod_name in _modules_to_patch:
+        monkeypatch.setattr(mod_name + ".FeatureFlags", _all_enabled_cls)
 
 
 @pytest.fixture()

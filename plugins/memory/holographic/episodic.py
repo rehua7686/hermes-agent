@@ -23,6 +23,19 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    """Check whether a table exists in the database."""
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
 # Additional schema for episodic tables (added to store.py _SCHEMA)
 EPISODE_SCHEMA = """\
 CREATE TABLE IF NOT EXISTS episodes (
@@ -262,6 +275,9 @@ class EpisodicTimeline:
     def link_episodes(self, source_id: int, target_id: int,
                       relation: str = "caused_by") -> None:
         """Store a causal/temporal link between episodes."""
+        if not _table_exists(self._conn, "cross_domain_links"):
+            logger.warning("link_episodes skipped: cross_domain_links table does not exist")
+            return
         try:
             with self._lock:
                 self._conn.execute(

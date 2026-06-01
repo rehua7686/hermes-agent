@@ -35,6 +35,18 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    """Check whether a table exists in the database."""
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Evolution-specific schema
 # ---------------------------------------------------------------------------
@@ -249,6 +261,12 @@ class SelfEvolution:
         Checks consolidation_runs table (from MemoryPipeline) and schemas table.
         Falls back to 0.3 if tables unavailable.
         """
+        if not _table_exists(self._pipeline_conn, "consolidation_runs"):
+            logger.warning("consolidation_yield skipped: consolidation_runs table does not exist")
+            return 0.3
+        if not _table_exists(self._pipeline_conn, "schemas"):
+            logger.warning("consolidation_yield skipped: schemas table does not exist")
+            return 0.3
         try:
             runs = self._pipeline_conn.execute(
                 "SELECT COUNT(*) FROM consolidation_runs "
@@ -277,6 +295,9 @@ class SelfEvolution:
         Uses dream_hypotheses table (from DreamEngine).
         Falls back to 0.2 if no hypotheses exist.
         """
+        if not _table_exists(self._pipeline_conn, "dream_hypotheses"):
+            logger.warning("prediction_accuracy skipped: dream_hypotheses table does not exist")
+            return 0.2
         try:
             row = self._pipeline_conn.execute(
                 """

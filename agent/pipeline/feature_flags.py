@@ -35,6 +35,10 @@ _FLAG_NAMES: tuple[str, ...] = (
     "v2_emotion_decay",
     "v2_predict",
     "v2_timestamp",
+    "v2_nli",
+    "v2_ner",
+    "v2_fsrs",
+    "v2_pmi",
 )
 
 

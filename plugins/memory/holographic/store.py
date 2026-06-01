@@ -4,6 +4,7 @@ Single-user Hermes memory store plugin.
 """
 
 import logging
+import math
 import re
 import sqlite3
 import struct
@@ -16,6 +17,14 @@ try:
     from . import holographic as hrr
 except ImportError:
     import holographic as hrr  # type: ignore[no-redef]
+
+# Lazy jieba availability check for CJK tokenization
+_HAS_JIEBA: bool
+try:
+    import jieba  # noqa: F401
+    _HAS_JIEBA = True
+except ImportError:
+    _HAS_JIEBA = False
 
 # Lazy embedding availability check (mirrors retrieval.py)
 _HAS_SENTENCE_TRANSFORMERS: bool
@@ -109,6 +118,71 @@ _RE_AKA          = re.compile(
 
 def _clamp_trust(value: float) -> float:
     return max(_TRUST_MIN, min(_TRUST_MAX, value))
+
+
+# FTS5 special characters that need escaping in queries
+_FTS5_SPECIAL_CHARS = re.compile(r'["\'()*+\-:^{}~]')
+
+
+def _sanitize_fts5_query(query: str) -> str:
+    """Escape FTS5 special characters in a query string.
+
+    Escapes: " ' ( ) * + - : ^ { } ~ so they are treated as literal
+    characters rather than FTS5 query operators.
+
+    Args:
+        query: Raw user query string.
+
+    Returns:
+        Sanitized query safe for FTS5 MATCH clause.
+    """
+    return _FTS5_SPECIAL_CHARS.sub(lambda m: f'"{m.group(0)}"', query)
+
+
+def _tokenize_for_fts(text: str) -> str:
+    """Tokenize text for FTS5 indexing/search with CJK support.
+
+    Uses jieba for Chinese word segmentation if available, otherwise
+    falls back to character-level tokenization for CJK ranges. Latin
+    text is kept as-is (split on whitespace).
+
+    Args:
+        text: Input text to tokenize.
+
+    Returns:
+        Space-separated tokens suitable for FTS5.
+    """
+    if not text:
+        return ""
+
+    if _HAS_JIEBA:
+        import jieba  # type: ignore[import-untyped]
+        tokens = jieba.lcut_for_search(text)
+        return " ".join(t.strip() for t in tokens if t.strip())
+
+    # Fallback: character-level for CJK ranges, word-level for Latin
+    _CJK_RANGES = (
+        '一-鿿'       # CJK Unified Ideographs
+        '㐀-䶿'       # CJK Extension A
+        '豈-﫿'       # CJK Compatibility Ideographs
+        '　-〿'       # CJK Symbols and Punctuation
+        '＀-￯'       # Fullwidth Forms
+    )
+    _re_cjk = re.compile(f'([{_CJK_RANGES}])')
+    # Split CJK characters into individual tokens, keep Latin words intact
+    parts = _re_cjk.split(text)
+    tokens: list[str] = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        if _re_cjk.match(part):
+            # Single CJK character -- emit it
+            tokens.append(part)
+        else:
+            # Latin / whitespace region -- split on whitespace
+            tokens.extend(w for w in part.split() if w)
+    return " ".join(tokens)
 
 
 class MemoryStore:
@@ -239,13 +313,20 @@ class MemoryStore:
 
         Returns a list of fact dicts ordered by FTS5 rank, then trust_score
         descending. Also increments retrieval_count for matched facts.
+
+        Applies CJK tokenization (jieba or character-level fallback) and
+        FTS5 query sanitization before matching.
         """
         with self._lock:
             query = query.strip()
             if not query:
                 return []
 
-            params: list = [query, min_trust]
+            # Tokenize for CJK support, then sanitize for FTS5 safety
+            tokenized = _tokenize_for_fts(query)
+            safe_query = _sanitize_fts5_query(tokenized)
+
+            params: list = [safe_query, min_trust]
             category_clause = ""
             if category is not None:
                 category_clause = "AND f.category = ?"
@@ -695,6 +776,82 @@ class MemoryStore:
             for category in categories:
                 self._rebuild_bank(category)
 
+            return len(rows)
+
+    # ------------------------------------------------------------------
+    # Trust temporal decay
+    # ------------------------------------------------------------------
+
+    def get_effective_trust(self, fact_id: int) -> float | None:
+        """Compute temporally decayed trust for a fact.
+
+        Formula: base_trust * 2^(-age_days / 30.0)
+
+        Facts created within the last day retain full base trust. After 30
+        days the trust halves; after 60 days it quarters; and so on.
+
+        Args:
+            fact_id: The fact to evaluate.
+
+        Returns:
+            Decayed trust score in [0, 1], or None if fact_id not found.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT trust_score, created_at FROM facts WHERE fact_id = ?",
+                (fact_id,),
+            ).fetchone()
+            if row is None:
+                return None
+
+            base_trust: float = row["trust_score"]
+            created_at: str | None = row["created_at"]
+            if created_at is None:
+                return base_trust
+
+            # Parse the timestamp and compute age in days
+            from datetime import datetime, timezone
+            try:
+                # SQLite CURRENT_TIMESTAMP format: YYYY-MM-DD HH:MM:SS
+                created = datetime.strptime(
+                    str(created_at), "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=timezone.utc)
+                now = datetime.now(timezone.utc)
+                age_days = max(0.0, (now - created).total_seconds() / 86400.0)
+            except (ValueError, TypeError):
+                return base_trust
+
+            decayed = base_trust * math.pow(2.0, -age_days / 30.0)
+            return max(_TRUST_MIN, min(_TRUST_MAX, decayed))
+
+    # ------------------------------------------------------------------
+    # FTS5 index rebuild (for CJK migration)
+    # ------------------------------------------------------------------
+
+    def rebuild_fts_index(self) -> int:
+        """Rebuild the FTS5 index from current fact content and tags.
+
+        Use this after enabling jieba or changing the CJK tokenizer so
+        that all existing facts are re-indexed with the new segmentation.
+
+        Returns:
+            Number of facts re-indexed.
+        """
+        with self._lock:
+            # Delete all existing FTS entries
+            self._conn.execute("DELETE FROM facts_fts")
+            # Re-insert all facts with tokenized content
+            rows = self._conn.execute(
+                "SELECT fact_id, content, tags FROM facts"
+            ).fetchall()
+            for row in rows:
+                tokenized_content = _tokenize_for_fts(row["content"])
+                tokenized_tags = _tokenize_for_fts(row["tags"] or "")
+                self._conn.execute(
+                    "INSERT INTO facts_fts(rowid, content, tags) VALUES (?, ?, ?)",
+                    (row["fact_id"], tokenized_content, tokenized_tags),
+                )
+            self._conn.commit()
             return len(rows)
 
     # ------------------------------------------------------------------

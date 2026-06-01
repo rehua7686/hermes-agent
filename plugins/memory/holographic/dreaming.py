@@ -34,6 +34,18 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    """Check whether a table exists in the database."""
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
 @dataclass
 class DreamResult:
     """Result of a dream cycle."""
@@ -126,6 +138,10 @@ class DreamEngine:
         if hours_since_last < self._cooldown_hours:
             return False
 
+        if not _table_exists(self._conn, "episodes") or not _table_exists(self._conn, "schemas"):
+            logger.warning("should_dream skipped: episodes or schemas table does not exist")
+            return False
+
         try:
             with self._lock:
                 count = self._conn.execute(
@@ -192,6 +208,9 @@ class DreamEngine:
         """Mode 1: Select top-K salient episodes, replay facts,
         boost matching schemas."""
         result = DreamResult(mode="replay")
+        if not _table_exists(self._conn, "episodes") or not _table_exists(self._conn, "schemas"):
+            logger.warning("Mode 1 replay skipped: episodes or schemas table does not exist")
+            return result
         try:
             with self._lock:
                 episodes = self._conn.execute(
@@ -249,6 +268,9 @@ class DreamEngine:
         """Mode 2: Find facts from different episodes sharing entities,
         create new schemas from their combination."""
         result = DreamResult(mode="patterns")
+        if not _table_exists(self._conn, "episodes") or not _table_exists(self._conn, "schemas"):
+            logger.warning("Mode 2 patterns skipped: episodes or schemas table does not exist")
+            return result
         try:
             with self._lock:
                 episodes = self._conn.execute(
@@ -321,6 +343,9 @@ class DreamEngine:
         """Mode 3: Use high-confidence schemas to generate predictions
         about unconsolidated facts."""
         result = DreamResult(mode="hypotheses")
+        if not _table_exists(self._conn, "schemas"):
+            logger.warning("Mode 3 hypotheses skipped: schemas table does not exist")
+            return result
         try:
             with self._lock:
                 schemas = self._conn.execute(
