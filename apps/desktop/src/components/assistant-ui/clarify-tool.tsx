@@ -2,7 +2,16 @@
 
 import { type ToolCallMessagePartProps } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
-import { type FormEvent, type KeyboardEvent, useCallback, useMemo, useRef, useState } from 'react'
+import {
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react'
 
 import { ToolFallback } from '@/components/assistant-ui/tool-fallback'
 import { Button } from '@/components/ui/button'
@@ -10,7 +19,17 @@ import { Textarea } from '@/components/ui/textarea'
 import { triggerHaptic } from '@/lib/haptics'
 import { HelpCircle, Loader2, PencilLine } from '@/lib/icons'
 import { cn } from '@/lib/utils'
-import { $clarifyRequest, clearClarifyRequest } from '@/store/clarify'
+import {
+  $clarifyInputs,
+  $clarifyRequest,
+  clarifyInputKey,
+  type ClarifyTextareaPosition,
+  clearClarifyRequest,
+  setClarifyDraft,
+  setClarifyFocusLocked,
+  setClarifyTextareaPosition,
+  setClarifyTyping
+} from '@/store/clarify'
 import { $gateway } from '@/store/gateway'
 import { notifyError } from '@/store/notifications'
 
@@ -47,6 +66,7 @@ export const ClarifyTool = (props: ToolCallMessagePartProps) => {
 
 function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
   const request = useStore($clarifyRequest)
+  const clarifyInputs = useStore($clarifyInputs)
   const gateway = useStore($gateway)
   const fromArgs = useMemo(() => readClarifyArgs(args), [args])
 
@@ -71,10 +91,152 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
 
   const hasChoices = choices.length > 0
 
-  const [typing, setTyping] = useState(false)
-  const [draft, setDraft] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const rootRef = useRef<HTMLDivElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const userFocusAwayUntilRef = useRef(0)
+
+  const inputKey = useMemo(
+    () => clarifyInputKey(matchingRequest?.requestId ?? null, question),
+    [matchingRequest?.requestId, question]
+  )
+
+  const clarifyInput = clarifyInputs[inputKey]
+  const draft = clarifyInput?.draft ?? ''
+  const focusLocked = clarifyInput?.focusLocked ?? false
+  const scrollTop = clarifyInput?.scrollTop ?? 0
+  const selectionEnd = clarifyInput?.selectionEnd ?? null
+  const selectionStart = clarifyInput?.selectionStart ?? null
+  const typing = clarifyInput?.typing ?? false
+  const freeformOpen = typing || !hasChoices
+
+  const readTextareaPosition = useCallback((textarea: HTMLTextAreaElement): ClarifyTextareaPosition => {
+    return {
+      scrollTop: textarea.scrollTop,
+      selectionEnd: textarea.selectionEnd,
+      selectionStart: textarea.selectionStart
+    }
+  }, [])
+
+  const saveTextareaPosition = useCallback(() => {
+    const textarea = textareaRef.current
+
+    if (textarea) {
+      setClarifyTextareaPosition(inputKey, readTextareaPosition(textarea))
+    }
+  }, [inputKey, readTextareaPosition])
+
+  const focusTextareaAtSavedPosition = useCallback(() => {
+    const textarea = textareaRef.current
+
+    if (!textarea || textarea.disabled) {
+      return
+    }
+
+    textarea.focus({ preventScroll: true })
+
+    const fallbackSelection = textarea.value.length
+    const nextSelectionStart = Math.min(selectionStart ?? fallbackSelection, textarea.value.length)
+    const nextSelectionEnd = Math.min(selectionEnd ?? nextSelectionStart, textarea.value.length)
+
+    textarea.setSelectionRange(nextSelectionStart, nextSelectionEnd)
+    textarea.scrollTop = scrollTop
+  }, [scrollTop, selectionEnd, selectionStart])
+
+  const restoreTextareaFocus = useCallback(() => {
+    if (!freeformOpen || !focusLocked || submitting) {
+      return
+    }
+
+    const root = rootRef.current
+    const textarea = textareaRef.current
+
+    if (!textarea || textarea.disabled) {
+      return
+    }
+
+    const active = document.activeElement
+
+    if (active === textarea) {
+      return
+    }
+
+    if (root && active instanceof Node && root.contains(active)) {
+      return
+    }
+
+    if (userFocusAwayUntilRef.current > window.performance.now()) {
+      return
+    }
+
+    focusTextareaAtSavedPosition()
+  }, [focusLocked, focusTextareaAtSavedPosition, freeformOpen, submitting])
+
+  useLayoutEffect(() => {
+    restoreTextareaFocus()
+
+    if (!freeformOpen || submitting) {
+      return undefined
+    }
+
+    // The inline tool can be recreated while the assistant stream settles.
+    // Repeat focus after browser focus restoration has finished.
+    const frame = window.requestAnimationFrame(restoreTextareaFocus)
+    const timeout = window.setTimeout(restoreTextareaFocus, 0)
+
+    return () => {
+      window.cancelAnimationFrame(frame)
+      window.clearTimeout(timeout)
+    }
+  }, [freeformOpen, restoreTextareaFocus, submitting])
+
+  useEffect(() => {
+    if (!freeformOpen || submitting) {
+      return undefined
+    }
+
+    const markUserFocusAway = () => {
+      userFocusAwayUntilRef.current = window.performance.now() + 1000
+      setClarifyFocusLocked(inputKey, false)
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const root = rootRef.current
+
+      if (root && event.target instanceof Node && root.contains(event.target)) {
+        return
+      }
+
+      markUserFocusAway()
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' && event.key !== 'Tab') {
+        return
+      }
+
+      const root = rootRef.current
+      const active = document.activeElement
+
+      if (root && active instanceof Node && root.contains(active)) {
+        markUserFocusAway()
+      }
+    }
+
+    const handleFocusIn = () => {
+      window.setTimeout(restoreTextareaFocus, 0)
+    }
+
+    window.addEventListener('pointerdown', handlePointerDown, true)
+    window.addEventListener('keydown', handleKeyDown, true)
+    window.addEventListener('focusin', handleFocusIn, true)
+
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown, true)
+      window.removeEventListener('keydown', handleKeyDown, true)
+      window.removeEventListener('focusin', handleFocusIn, true)
+    }
+  }, [freeformOpen, inputKey, restoreTextareaFocus, submitting])
 
   // Race: tool.start fires a tick before clarify.request, so request_id
   // arrives slightly after the tool block mounts. Show the question (from
@@ -115,7 +277,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
   )
 
   const handleTextareaKey = useCallback(
-    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
       if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
         event.preventDefault()
         const trimmed = draft.trim()
@@ -141,7 +303,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
   )
 
   const handleChoiceKey = useCallback(
-    (event: KeyboardEvent<HTMLDivElement>) => {
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
       if (typing || submitting) {
         return
       }
@@ -163,6 +325,7 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
         'shadow-[inset_0_1px_0_color-mix(in_srgb,var(--foreground)_3%,transparent)]'
       )}
       data-slot="clarify-inline"
+      ref={rootRef}
     >
       <div className="flex items-start gap-2.5">
         <span
@@ -208,8 +371,9 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
             )}
             disabled={submitting}
             onClick={() => {
-              setTyping(true)
-              window.setTimeout(() => textareaRef.current?.focus({ preventScroll: true }), 0)
+              setClarifyTyping(inputKey, true)
+              setClarifyFocusLocked(inputKey, true)
+              window.setTimeout(focusTextareaAtSavedPosition, 0)
             }}
             type="button"
           >
@@ -224,13 +388,23 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
         </div>
       )}
 
-      {(typing || !hasChoices) && (
+      {freeformOpen && (
         <form className="grid gap-2" onSubmit={handleSubmitFreeform}>
           <Textarea
             className="min-h-20 resize-y rounded-lg border-border/70 bg-background/60 text-sm"
             disabled={submitting}
-            onChange={event => setDraft(event.target.value)}
+            onBlur={event => {
+              setClarifyTextareaPosition(inputKey, readTextareaPosition(event.currentTarget))
+              window.setTimeout(restoreTextareaFocus, 0)
+            }}
+            onChange={event => setClarifyDraft(inputKey, event.target.value, readTextareaPosition(event.target))}
+            onFocus={() => {
+              setClarifyFocusLocked(inputKey, true)
+              window.requestAnimationFrame(focusTextareaAtSavedPosition)
+            }}
             onKeyDown={handleTextareaKey}
+            onScroll={saveTextareaPosition}
+            onSelect={saveTextareaPosition}
             placeholder="Type your answer…"
             ref={textareaRef}
             value={draft}
@@ -242,8 +416,9 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
                 <Button
                   disabled={submitting}
                   onClick={() => {
-                    setTyping(false)
-                    setDraft('')
+                    setClarifyTyping(inputKey, false)
+                    setClarifyFocusLocked(inputKey, false)
+                    setClarifyDraft(inputKey, '')
                   }}
                   size="sm"
                   type="button"
