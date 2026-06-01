@@ -222,25 +222,43 @@ class MemoryStore:
             return
 
         fd = open(lock_path, "a+", encoding="utf-8")
+        lock_acquired = False
         try:
-            if fcntl:
-                fcntl.flock(fd, fcntl.LOCK_EX)
+            from agent.pipeline.feature_flags import FeatureFlags
+            _ff = FeatureFlags()
+            if _ff.is_enabled('v2_concurrency'):
+                # M9 fix: raise RuntimeError on lock acquisition failure
+                try:
+                    if fcntl:
+                        fcntl.flock(fd, fcntl.LOCK_EX)
+                    else:
+                        fd.seek(0)
+                        msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)
+                except (OSError, IOError) as exc:
+                    raise RuntimeError(
+                        f"Failed to acquire file lock: {exc}"
+                    ) from exc
             else:
-                fd.seek(0)
-                msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)
+                if fcntl:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                else:
+                    fd.seek(0)
+                    msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)
+            lock_acquired = True
             yield
         finally:
-            if fcntl:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                except (OSError, IOError):
-                    pass
-            elif msvcrt:
-                try:
-                    fd.seek(0)
-                    msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
-                except (OSError, IOError):
-                    pass
+            if lock_acquired:
+                if fcntl:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    except (OSError, IOError):
+                        pass
+                elif msvcrt:
+                    try:
+                        fd.seek(0)
+                        msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+                    except (OSError, IOError):
+                        pass
             fd.close()
 
     @staticmethod
@@ -598,6 +616,10 @@ class MemoryStore:
                 raise
         except (OSError, IOError) as e:
             raise RuntimeError(f"Failed to write memory file {path}: {e}")
+
+
+# Alias for backward compatibility and test imports
+MemoryTool = MemoryStore
 
 
 def memory_tool(

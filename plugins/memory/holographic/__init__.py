@@ -28,6 +28,28 @@ from .store import MemoryStore
 from .retrieval import FactRetriever
 from hermes_cli.config import cfg_get
 
+# Lazy imports for optional modules (activated via config)
+_EPISODIC_AVAILABLE = True
+_DREAMING_AVAILABLE = True
+_SELF_EVOLUTION_AVAILABLE = True
+_HIPPOCAMPAL_AVAILABLE = True
+try:
+    from .episodic import EpisodicTimeline
+except ImportError:
+    _EPISODIC_AVAILABLE = False
+try:
+    from .dreaming import DreamEngine
+except ImportError:
+    _DREAMING_AVAILABLE = False
+try:
+    from .self_evolution import SelfEvolution
+except ImportError:
+    _SELF_EVOLUTION_AVAILABLE = False
+try:
+    from .hippocampal_index import HippocampalIndex
+except ImportError:
+    _HIPPOCAMPAL_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -120,6 +142,10 @@ class HolographicMemoryProvider(MemoryProvider):
         self._store = None
         self._retriever = None
         self._min_trust = float(self._config.get("min_trust_threshold", 0.3))
+        self._episodic = None
+        self._dreaming = None
+        self._self_evolution = None
+        self._hippocampal = None
 
     @property
     def name(self) -> str:
@@ -153,6 +179,14 @@ class HolographicMemoryProvider(MemoryProvider):
             {"key": "auto_extract", "description": "Auto-extract facts at session end", "default": "false", "choices": ["true", "false"]},
             {"key": "default_trust", "description": "Default trust score for new facts", "default": "0.5"},
             {"key": "hrr_dim", "description": "HRR vector dimensions", "default": "1024"},
+            {"key": "embedding_enabled", "description": "Enable embedding semantic search (requires sentence-transformers)", "default": "false", "choices": ["true", "false"]},
+            {"key": "embedding_model", "description": "Sentence-transformers model name", "default": "all-MiniLM-L6-v2"},
+            {"key": "embedding_dim", "description": "Embedding vector dimensions", "default": "384"},
+            {"key": "embedding_weight", "description": "Weight for embedding signal in hybrid search (0.0-1.0)", "default": "0.40"},
+            {"key": "episodic_enabled", "description": "Enable episodic timeline (what-where-when binding)", "default": "false", "choices": ["true", "false"]},
+            {"key": "dreaming_enabled", "description": "Enable dream engine (structured replay for consolidation)", "default": "false", "choices": ["true", "false"]},
+            {"key": "self_evolution_enabled", "description": "Enable self-evolution (homeostatic self-regulation)", "default": "false", "choices": ["true", "false"]},
+            {"key": "hippocampal_enabled", "description": "Enable hippocampal index (sparse associative retrieval)", "default": "false", "choices": ["true", "false"]},
         ]
 
     def initialize(self, session_id: str, **kwargs) -> None:
@@ -171,14 +205,69 @@ class HolographicMemoryProvider(MemoryProvider):
         hrr_weight = float(self._config.get("hrr_weight", 0.3))
         temporal_decay = int(self._config.get("temporal_decay_half_life", 0))
 
-        self._store = MemoryStore(db_path=db_path, default_trust=default_trust, hrr_dim=hrr_dim)
+        embedding_model = str(self._config.get("embedding_model", "all-MiniLM-L6-v2"))
+        embedding_enabled = str(self._config.get("embedding_enabled", "false")).lower() in ("true", "1", "yes")
+        embedding_dim = int(self._config.get("embedding_dim", 384))
+        embedding_weight = float(self._config.get("embedding_weight", 0.40))
+
+        self._store = MemoryStore(
+            db_path=db_path,
+            default_trust=default_trust,
+            hrr_dim=hrr_dim,
+            embedding_model=embedding_model,
+        )
         self._retriever = FactRetriever(
             store=self._store,
             temporal_decay_half_life=temporal_decay,
             hrr_weight=hrr_weight,
             hrr_dim=hrr_dim,
+            embedding_enabled=embedding_enabled,
+            embedding_model=embedding_model,
+            embedding_dim=embedding_dim,
+            embedding_weight=embedding_weight,
         )
         self._session_id = session_id
+
+        # --- Optional modules (default disabled) ---
+        episodic_enabled = str(self._config.get("episodic_enabled", "false")).lower() in ("true", "1", "yes")
+        dreaming_enabled = str(self._config.get("dreaming_enabled", "false")).lower() in ("true", "1", "yes")
+        self_evolution_enabled = str(self._config.get("self_evolution_enabled", "false")).lower() in ("true", "1", "yes")
+        hippocampal_enabled = str(self._config.get("hippocampal_enabled", "false")).lower() in ("true", "1", "yes")
+
+        conn = self._store._conn
+        lock = self._store._lock
+
+        if episodic_enabled and _EPISODIC_AVAILABLE:
+            try:
+                self._episodic = EpisodicTimeline(conn, lock)
+                self._episodic.init_tables()
+                logger.info("EpisodicTimeline activated")
+            except Exception as e:
+                logger.warning("Failed to init EpisodicTimeline: %s", e)
+
+        if dreaming_enabled and _DREAMING_AVAILABLE:
+            try:
+                self._dreaming = DreamEngine(conn, lock)
+                self._dreaming.init_tables()
+                logger.info("DreamEngine activated")
+            except Exception as e:
+                logger.warning("Failed to init DreamEngine: %s", e)
+
+        if self_evolution_enabled and _SELF_EVOLUTION_AVAILABLE:
+            try:
+                self._self_evolution = SelfEvolution(conn, lock, config=self._config)
+                self._self_evolution.init_tables()
+                logger.info("SelfEvolution activated")
+            except Exception as e:
+                logger.warning("Failed to init SelfEvolution: %s", e)
+
+        if hippocampal_enabled and _HIPPOCAMPAL_AVAILABLE:
+            try:
+                self._hippocampal = HippocampalIndex(conn, lock)
+                self._hippocampal.init_tables()
+                logger.info("HippocampalIndex activated")
+            except Exception as e:
+                logger.warning("Failed to init HippocampalIndex: %s", e)
 
     def system_prompt_block(self) -> str:
         if not self._store:
@@ -251,8 +340,24 @@ class HolographicMemoryProvider(MemoryProvider):
                 logger.debug("Holographic memory_write mirror failed: %s", e)
 
     def shutdown(self) -> None:
+        # Close retriever cache first (pipeline_state.db connection)
+        if self._retriever is not None:
+            try:
+                self._retriever.close_cache()
+            except Exception:
+                pass
+        # Close the main store connection
+        if self._store is not None:
+            try:
+                self._store.close()
+            except Exception:
+                pass
         self._store = None
         self._retriever = None
+        self._episodic = None
+        self._dreaming = None
+        self._self_evolution = None
+        self._hippocampal = None
 
     # -- Tool handlers -------------------------------------------------------
 
