@@ -24,6 +24,7 @@ const { execFileSync, spawn } = require('node:child_process')
 const { isWindowsBinaryPathInWsl, isWslEnvironment } = require('./bootstrap-platform.cjs')
 const { runBootstrap } = require('./bootstrap-runner.cjs')
 const { canImportHermesCli, verifyHermesCli } = require('./backend-probes.cjs')
+const { importWslHermesHomeIfNeeded } = require('./wsl-hermes-home.cjs')
 const {
   DATA_URL_READ_MAX_BYTES,
   DEFAULT_FETCH_TIMEOUT_MS,
@@ -143,10 +144,16 @@ if (INSTALL_STAMP) {
 //   Windows: %LOCALAPPDATA%\hermes (matches install.ps1)
 //   macOS / Linux: ~/.hermes (matches install.sh)
 //
-// Special case for Windows: if the user has a legacy ~/.hermes directory
-// (e.g., from a prior pip install or a manual setup) AND no
-// %LOCALAPPDATA%\hermes yet, prefer the legacy path so we don't orphan their
-// existing config / sessions / .env. New installs go to %LOCALAPPDATA%.
+// Special cases for Windows:
+//   1. If the user has a legacy native ~/.hermes directory (e.g., from a prior
+//      pip install or a manual setup) AND no %LOCALAPPDATA%\hermes yet, prefer
+//      the legacy path so we don't orphan their existing config / sessions /
+//      .env.
+//   2. If there is no native Hermes home at all, try a one-time import from a
+//      WSL Hermes home before first bootstrap. The import copies user state
+//      only, not OS-specific runtime directories like hermes-agent/, venv/,
+//      node/, git/, logs/, or bootstrap caches.
+// New native installs still run from %LOCALAPPDATA%.
 //
 // HERMES_DESKTOP_USER_DATA_DIR (used by test:desktop:fresh) puts the sandbox
 // HERMES_HOME beneath the throwaway userData dir so a fresh-install run never
@@ -160,6 +167,14 @@ function resolveHermesHome() {
     // Migrate transparently to LOCALAPPDATA, but honour an existing legacy
     // ~/.hermes setup (no LOCALAPPDATA install yet) so users don't lose state.
     if (!directoryExists(localappdata) && directoryExists(legacy)) return legacy
+    if (!directoryExists(localappdata)) {
+      importWslHermesHomeIfNeeded({
+        destination: localappdata,
+        env: process.env,
+        logger: message => console.log(`[hermes] ${message}`),
+        windowsHome: app.getPath('home')
+      })
+    }
     return localappdata
   }
   return path.join(app.getPath('home'), '.hermes')
