@@ -11966,6 +11966,16 @@ def main():
         help="Replace any existing gateway instance (useful for systemd)",
     )
     gateway_run.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Start a foreground gateway even when a systemd/launchd service is "
+            "already supervising this profile. Without --force, the command "
+            "refuses, because a second dispatcher escapes the service and can "
+            "corrupt the shared kanban DB."
+        ),
+    )
+    gateway_run.add_argument(
         "--no-supervise",
         action="store_true",
         help=(
