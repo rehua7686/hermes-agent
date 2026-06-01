@@ -1218,6 +1218,12 @@ DEFAULT_CONFIG = {
         # behavior of showing tool-call summaries inline.
         "resume_skip_tool_only": True,
         "busy_input_mode": "interrupt",  # interrupt | queue | steer
+        # Issue #26024: per-mode acknowledgement message overrides.
+        # Each template may contain a single {status_detail} placeholder;
+        # see tools/busy_ack_templates.py for the default strings.
+        # Unset (default) preserves the historical messages exactly.
+        # A whitespace-only override suppresses that one mode silently.
+        "busy_ack_templates": {},  # {interrupt|queue|steer: "template ..."}
         # When true, `hermes --tui` auto-resumes the most recent human-
         # facing session on launch instead of forging a fresh one.
         # Mirrors `hermes -c` muscle memory.  Default off so existing
