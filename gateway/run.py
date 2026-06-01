@@ -2629,7 +2629,7 @@ class GatewayRunner:
         mode, attach `request_overrides` so the API call is marked
         accordingly.
         """
-        from hermes_cli.models import resolve_fast_mode_overrides
+        from hermes_cli.models import resolve_fast_mode_overrides_for_runtime
 
         runtime = {
             "api_key": runtime_kwargs.get("api_key"),
@@ -2659,7 +2659,12 @@ class GatewayRunner:
             return route
 
         try:
-            overrides = resolve_fast_mode_overrides(route["model"])
+            overrides = resolve_fast_mode_overrides_for_runtime(
+                route["model"],
+                provider=runtime["provider"],
+                api_mode=runtime["api_mode"],
+                base_url=runtime["base_url"],
+            )
         except Exception:
             overrides = None
         route["request_overrides"] = overrides or {}
@@ -17579,6 +17584,8 @@ class GatewayRunner:
             agent.reasoning_config = reasoning_config
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides") or {}
+            if isinstance(getattr(agent, "_primary_runtime", None), dict):
+                agent._primary_runtime["request_overrides"] = dict(agent.request_overrides)
 
             _bg_review_release = threading.Event()
             _bg_review_pending: list[str] = []
