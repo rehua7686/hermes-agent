@@ -50,6 +50,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Feature flag gate for v2 concurrency fixes (C1, C2, C3, H6)
+from agent.pipeline.feature_flags import FeatureFlags
+
 
 # ===========================================================================
 # Layer 1: SalienceScorer (sensory gate)
@@ -212,17 +215,28 @@ class SalienceScorer:
             if len(text) > 200:
                 importance = min(1.0, importance + 0.1)
             freshness = self._rep.observe(text)
-            novelty = freshness
-            rep_factor = freshness
             # Bitemporal boost: recent-event expressions increase novelty
             recency_boost = 0.0
             for pattern, weight in _RECENCY_PATTERNS + _RECENCY_PATTERNS_ZH:
                 if pattern.search(text):
                     recency_boost = max(recency_boost, weight)
-            novelty = min(1.0, novelty + recency_boost)
-            raw = (0.25 * emotion + 0.30 * novelty + 0.30 * importance
-                   + 0.15 * min(1.0, len(text) / 200))
-            adjusted = raw * rep_factor * (1.0 - (1.0 - trivial_penalty) * 0.8)
+            _ff1 = FeatureFlags()
+            if _ff1.is_enabled('v2_salience'):
+                # FIX 1 (H1): Decouple novelty from rep_penalty.
+                # freshness IS the novelty signal; rep_penalty is separate.
+                novelty = min(1.0, freshness + recency_boost)
+                rep_factor = freshness
+                raw = (0.25 * emotion + 0.30 * novelty + 0.30 * importance
+                       + 0.15 * min(1.0, len(text) / 200))
+                trivial_mult = (1.0 - (1.0 - trivial_penalty) * 0.8)
+                adjusted = raw * (rep_factor if is_trivial else 1.0) * trivial_mult
+            else:
+                novelty = freshness
+                rep_factor = freshness
+                novelty = min(1.0, novelty + recency_boost)
+                raw = (0.25 * emotion + 0.30 * novelty + 0.30 * importance
+                       + 0.15 * min(1.0, len(text) / 200))
+                adjusted = raw * rep_factor * (1.0 - (1.0 - trivial_penalty) * 0.8)
             overall = max(0.0, min(1.0, adjusted))
             return SalienceResult(
                 overall=overall, emotion=emotion, novelty=novelty,
@@ -376,7 +390,8 @@ class SilentEngramEngine:
         return total_affected
 
     def strengthen(self, state: 'PipelineState', memory_ref: str,
-                   delta: float = 0.03) -> float:
+                   delta: float = 0.03,
+                   emotional_valence: float = 0.0) -> float:
         """Strengthen an engram on retrieval (spacing effect). Returns new strength."""
         if not state:
             return 0.0
@@ -386,21 +401,40 @@ class SilentEngramEngine:
                     "SELECT strength FROM engram_strengths WHERE memory_ref = ?",
                     (memory_ref,),
                 ).fetchone()
+                _ff8 = FeatureFlags()
                 if row:
                     new_str = min(1.0, row["strength"] + delta)
-                    state._conn.execute(
-                        "UPDATE engram_strengths SET strength = ?, "
-                        "last_accessed = CURRENT_TIMESTAMP, "
-                        "access_count = access_count + 1 "
-                        "WHERE memory_ref = ?",
-                        (new_str, memory_ref),
-                    )
+                    if _ff8.is_enabled('v2_emotion_decay'):
+                        # FIX 8 (M2): Store per-memory emotional valence
+                        state._conn.execute(
+                            "UPDATE engram_strengths SET strength = ?, "
+                            "last_accessed = CURRENT_TIMESTAMP, "
+                            "access_count = access_count + 1, "
+                            "emotional_valence = ? "
+                            "WHERE memory_ref = ?",
+                            (new_str, emotional_valence, memory_ref),
+                        )
+                    else:
+                        state._conn.execute(
+                            "UPDATE engram_strengths SET strength = ?, "
+                            "last_accessed = CURRENT_TIMESTAMP, "
+                            "access_count = access_count + 1 "
+                            "WHERE memory_ref = ?",
+                            (new_str, memory_ref),
+                        )
                 else:
-                    new_str = min(1.0, 1.0 + delta)
+                    _ff2 = FeatureFlags()
+                    if _ff2.is_enabled('v2_engram') and delta > 0:
+                        # FIX 2 (H3): New engrams start in fragile period (Ebbinghaus)
+                        INITIAL_ENGRAM_STRENGTH = 0.3
+                        new_str = min(1.0, INITIAL_ENGRAM_STRENGTH + delta)
+                    else:
+                        new_str = min(1.0, 1.0 + delta)
                     state._conn.execute(
                         "INSERT INTO engram_strengths "
-                        "(memory_ref, provider, strength) VALUES (?, 'unknown', ?)",
-                        (memory_ref, new_str),
+                        "(memory_ref, provider, strength, emotional_valence) "
+                        "VALUES (?, 'unknown', ?, ?)",
+                        (memory_ref, new_str, emotional_valence),
                     )
                 state._conn.commit()
                 return new_str
@@ -496,19 +530,67 @@ class ConsolidationEngine:
                     facts_sorted.sort(key=_engram_strength_key)
 
                     # Get existing schema contents for dedup
-                    existing = state._conn.execute(
-                        "SELECT content FROM schemas ORDER BY updated_at DESC LIMIT 20"
-                    ).fetchall()
-                    existing_contents = {r["content"][:50] for r in existing}
+                    _ff3 = FeatureFlags()
+                    if _ff3.is_enabled('v2_dedup'):
+                        # FIX 3 (H2): SHA256 hash + Jaccard similarity dedup
+                        _existing_rows = state._conn.execute(
+                            "SELECT schema_id, content FROM schemas "
+                            "ORDER BY updated_at DESC LIMIT 100"
+                        ).fetchall()
+                        _norm = lambda t: " ".join(t.lower().split())
+                        existing_hashes = {
+                            sha256(_norm(r["content"]).encode()).hexdigest()[:16]
+                            for r in _existing_rows
+                        }
+                        existing_schemas = [
+                            (r["schema_id"], r["content"]) for r in _existing_rows
+                        ]
+                    else:
+                        _existing_rows_old = state._conn.execute(
+                            "SELECT content FROM schemas ORDER BY updated_at DESC LIMIT 20"
+                        ).fetchall()
+                        existing_contents_old = {
+                            r["content"][:50] for r in _existing_rows_old
+                        }
 
                     for fact in facts_sorted[:10]:
                         content = fact.get("content", "")
                         domain = fact.get("domain", "general")
                         if not content or len(content) < 10:
                             continue
-                        if content[:50] in existing_contents:
-                            updated += 1
-                            continue
+                        if _ff3.is_enabled('v2_dedup'):
+                            h = sha256(
+                                " ".join(content.lower().split()).encode()
+                            ).hexdigest()[:16]
+                            if h in existing_hashes:
+                                updated += 1
+                                continue
+                            # Word-level Jaccard for approximate dedup
+                            _is_dup = False
+                            _cw = set(content.lower().split())
+                            for _sid, _ec in existing_schemas:
+                                _ew = set(_ec.lower().split())
+                                _jaccard = (
+                                    len(_cw & _ew) / len(_cw | _ew)
+                                    if _cw and _ew else 0.0
+                                )
+                                if _jaccard > 0.85:
+                                    _is_dup = True
+                                    state._conn.execute(
+                                        "UPDATE schemas SET "
+                                        "confidence = MIN(1.0, confidence + 0.05), "
+                                        "updated_at = CURRENT_TIMESTAMP "
+                                        "WHERE schema_id = ?",
+                                        (_sid,),
+                                    )
+                                    updated += 1
+                                    break
+                            if _is_dup:
+                                continue
+                        else:
+                            if content[:50] in existing_contents_old:
+                                updated += 1
+                                continue
                         base_conf = self._temporal_confidence_boost(fact)
                         state._conn.execute(
                             "INSERT INTO schemas (content, domain, confidence) "
@@ -537,8 +619,17 @@ class ConsolidationEngine:
                     for _fact in facts_sorted[:10]:
                         _c = _fact.get('content', '')
                         _d = _fact.get('domain', 'general')
-                        if (_c and len(_c) >= 10
-                                and _c[:50] not in existing_contents):
+                        if not _c or len(_c) < 10:
+                            continue
+                        _is_new = True
+                        if _ff3.is_enabled('v2_dedup'):
+                            _ch = sha256(
+                                " ".join(_c.lower().split()).encode()
+                            ).hexdigest()[:16]
+                            _is_new = _ch not in existing_hashes
+                        else:
+                            _is_new = _c[:50] not in existing_contents_old
+                        if _is_new:
                             _new_schemas.append((_c, _d))
 
                     if _new_schemas:
@@ -1045,18 +1136,30 @@ class FeedbackCoordinator:
         if not state:
             return []
         try:
-            with state._lock:
-                # High-confidence schemas (original logic)
-                conf_rows = state._conn.execute(
+            _ff = FeatureFlags()
+            _use_db = _ff.is_enabled('v2_concurrency') or hasattr(state, 'db')
+            # C3 fix: use state.db.execute() to eliminate lock-order inversion
+            if _use_db:
+                conf_rows = state.db.execute(
                     "SELECT content, confidence, updated_at FROM schemas "
                     "WHERE confidence > 0.3 ORDER BY confidence DESC LIMIT 3"
                 ).fetchall()
-                # Recently updated schemas (temporal query -- last 24h)
-                recent_rows = state._conn.execute(
+                recent_rows = state.db.execute(
                     "SELECT content, confidence, updated_at FROM schemas "
                     "WHERE updated_at >= datetime('now', '-1 day') "
                     "ORDER BY updated_at DESC LIMIT 3"
                 ).fetchall()
+            else:
+                with state._lock:
+                    conf_rows = state._conn.execute(
+                        "SELECT content, confidence, updated_at FROM schemas "
+                        "WHERE confidence > 0.3 ORDER BY confidence DESC LIMIT 3"
+                    ).fetchall()
+                    recent_rows = state._conn.execute(
+                        "SELECT content, confidence, updated_at FROM schemas "
+                        "WHERE updated_at >= datetime('now', '-1 day') "
+                        "ORDER BY updated_at DESC LIMIT 3"
+                    ).fetchall()
             # Merge, deduplicating by content prefix
             seen_prefixes: set[str] = set()
             predictions: list[str] = []
@@ -1079,13 +1182,14 @@ class FeedbackCoordinator:
                     f"conf={row['confidence']:.2f}): {row['content'][:100]}"
                 )
             # Fix 3: Include recently consolidated schemas as predictions
+            _db_exec = state.db.execute if _use_db else state._conn.execute
             try:
-                last_run = state._conn.execute(
+                last_run = _db_exec(
                     "SELECT timestamp FROM consolidation_runs "
                     "ORDER BY timestamp DESC LIMIT 1"
                 ).fetchone()
                 if last_run:
-                    recent_schemas = state._conn.execute(
+                    recent_schemas = _db_exec(
                         "SELECT content, confidence FROM schemas "
                         "WHERE created_at >= ? OR updated_at >= ? "
                         "ORDER BY confidence DESC LIMIT 3",
@@ -1105,25 +1209,45 @@ class FeedbackCoordinator:
                     "Consolidated schema prediction failed: %s", e)
             # Insert predictions into predictions table
             try:
+                _ff7 = FeatureFlags()
                 for pred_text in predictions:
-                    row = state._conn.execute(
-                        "SELECT schema_id FROM schemas "
-                        "WHERE ? LIKE '%' || "
-                        "substr(content, 1, 50) || '%' "
-                        "ORDER BY confidence DESC "
-                        "LIMIT 1",
-                        (pred_text,),
-                    ).fetchone()
+                    if _ff7.is_enabled('v2_predict'):
+                        # FIX 7 (D4): Extract actual schema content from
+                        # prediction text (strip prefix) for matching
+                        _match_text = pred_text
+                        _colon = pred_text.find("): ")
+                        if _colon > 0:
+                            _match_text = pred_text[_colon + 3:]
+                        row = _db_exec(
+                            "SELECT schema_id FROM schemas "
+                            "WHERE ? LIKE '%' || "
+                            "substr(content, 1, 50) || '%' "
+                            "ORDER BY confidence DESC "
+                            "LIMIT 1",
+                            (_match_text,),
+                        ).fetchone()
+                    else:
+                        row = _db_exec(
+                            "SELECT schema_id FROM schemas "
+                            "WHERE ? LIKE '%' || "
+                            "substr(content, 1, 50) || '%' "
+                            "ORDER BY confidence DESC "
+                            "LIMIT 1",
+                            (pred_text,),
+                        ).fetchone()
                     sid = (row["schema_id"]
                            if row else None)
-                    state._conn.execute(
+                    _db_exec(
                         "INSERT INTO predictions "
                         "(schema_id, prediction, "
                         " context) "
                         "VALUES (?, ?, ?)",
                         (sid, pred_text, context),
                     )
-                state._conn.commit()
+                if _use_db:
+                    state.db.commit()
+                else:
+                    state._conn.commit()
             except Exception as e:
                 logger.debug(
                     "Prediction insert failed: %s", e)
@@ -1142,6 +1266,8 @@ class FeedbackCoordinator:
         if not pending or not state:
             return 0.0
         try:
+            _ff = FeatureFlags()
+            _use_db = _ff.is_enabled('v2_concurrency') or hasattr(state, 'db')
             actual_tokens = set(actual.lower().split())
             max_error = 0.0
             for pred in pending:
@@ -1154,14 +1280,66 @@ class FeedbackCoordinator:
                 max_error = max(max_error, error)
 
             # Update schema confidence based on prediction error
+            _ff5 = FeatureFlags()
             if max_error > 0.5:
                 # High error: schema was wrong, decrease confidence
-                with state._lock:
-                    state._conn.execute(
-                        "UPDATE schemas SET confidence = MAX(0.1, confidence - 0.05) "
-                        "WHERE confidence > 0.3"
-                    )
-                    state._conn.commit()
+                if _ff5.is_enabled('v2_confidence'):
+                    # FIX 5 (H5): Only penalize schemas that generated
+                    # predictions AND whose content overlaps with outcome
+                    _db_exec = state.db.execute if _use_db else state._conn.execute
+                    _pred_rows = _db_exec(
+                        "SELECT DISTINCT schema_id FROM predictions "
+                        "WHERE schema_id IS NOT NULL"
+                    ).fetchall()
+                    _sids = [r["schema_id"] for r in _pred_rows]
+                    if _sids:
+                        _placeholders = ",".join("?" for _ in _sids)
+                        _target_rows = _db_exec(
+                            f"SELECT schema_id, content FROM schemas "
+                            f"WHERE schema_id IN ({_placeholders})",
+                            _sids,
+                        ).fetchall()
+                        _actual_tokens = set(actual.lower().split())
+                        _targeted_sids = []
+                        for _r in _target_rows:
+                            _schema_tokens = set(
+                                _r["content"].lower().split())
+                            if (_actual_tokens and _schema_tokens
+                                    and len(_actual_tokens & _schema_tokens)
+                                    / max(1, len(_actual_tokens
+                                                | _schema_tokens)) > 0.05):
+                                _targeted_sids.append(_r["schema_id"])
+                        if _targeted_sids:
+                            _ph2 = ",".join(
+                                "?" for _ in _targeted_sids)
+                            _db_exec(
+                                f"UPDATE schemas SET "
+                                f"confidence = MAX(0.1, "
+                                f"  confidence - 0.05), "
+                                f"updated_at = CURRENT_TIMESTAMP "
+                                f"WHERE schema_id IN ({_ph2})",
+                                _targeted_sids,
+                            )
+                    if _use_db:
+                        state.db.commit()
+                    else:
+                        state._conn.commit()
+                else:
+                    if _use_db:
+                        state.db.execute(
+                            "UPDATE schemas SET confidence = MAX(0.1, confidence - 0.05), "
+                            "updated_at = CURRENT_TIMESTAMP "
+                            "WHERE confidence > 0.3"
+                        )
+                        state.db.commit()
+                    else:
+                        with state._lock:
+                            state._conn.execute(
+                                "UPDATE schemas SET confidence = MAX(0.1, confidence - 0.05), "
+                                "updated_at = CURRENT_TIMESTAMP "
+                                "WHERE confidence > 0.3"
+                            )
+                            state._conn.commit()
                 # Fix 4: High prediction error triggers reconsolidation
                 if self._reconsolidation:
                     try:
@@ -1176,12 +1354,21 @@ class FeedbackCoordinator:
                             "failed: %s", e)
             elif max_error < 0.2:
                 # Low error: schema was right, increase confidence
-                with state._lock:
-                    state._conn.execute(
-                        "UPDATE schemas SET confidence = MIN(1.0, confidence + 0.03) "
+                if _use_db:
+                    state.db.execute(
+                        "UPDATE schemas SET confidence = MIN(1.0, confidence + 0.03), "
+                        "updated_at = CURRENT_TIMESTAMP "
                         "WHERE confidence > 0.3"
                     )
-                    state._conn.commit()
+                    state.db.commit()
+                else:
+                    with state._lock:
+                        state._conn.execute(
+                            "UPDATE schemas SET confidence = MIN(1.0, confidence + 0.03), "
+                            "updated_at = CURRENT_TIMESTAMP "
+                            "WHERE confidence > 0.3"
+                        )
+                        state._conn.commit()
 
             with self._lock:
                 self._pending_predictions = []
@@ -1453,17 +1640,26 @@ class ActivationGraph:
             return []
 
         G: nx.Graph = nx.Graph()
+        _ff4 = FeatureFlags()
         for row in rows:
-            G.add_edge(
-                row["source_entity"], row["target_entity"],
-                weight=float(row["strength"]),
-            )
+            _str = float(row["strength"])
+            if _ff4.is_enabled('v2_activation'):
+                # FIX 4 (H4): Inverse weight so shortest_path finds strongest path
+                G.add_edge(
+                    row["source_entity"], row["target_entity"],
+                    weight=1.0 / max(_str, 0.01),
+                    strength=_str,
+                )
+            else:
+                G.add_edge(
+                    row["source_entity"], row["target_entity"],
+                    weight=_str,
+                )
 
         if entity_a not in G or entity_b not in G:
             return []
 
         try:
-            # Use weight=1/strength so stronger edges are shorter
             path = nx.shortest_path(
                 G, source=entity_a, target=entity_b, weight="weight")
         except (nx.NetworkXNoPath, nx.NodeNotFound):
@@ -1666,7 +1862,8 @@ CREATE TABLE IF NOT EXISTS salience_encoding_log (
 CREATE TABLE IF NOT EXISTS engram_strengths (
     memory_ref TEXT PRIMARY KEY, provider TEXT NOT NULL,
     strength REAL DEFAULT 1.0, last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    decay_half_life_hours REAL DEFAULT 720.0, access_count INTEGER DEFAULT 0
+    decay_half_life_hours REAL DEFAULT 720.0, access_count INTEGER DEFAULT 0,
+    emotional_valence REAL DEFAULT 0.0
 );
 CREATE TABLE IF NOT EXISTS schemas (
     schema_id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL,
@@ -1728,6 +1925,46 @@ CREATE INDEX IF NOT EXISTS idx_consolidation_runs_ts ON consolidation_runs(times
 
 
 # ===========================================================================
+# DatabaseAccessor -- thread-safe SQLite wrapper (C1 fix)
+# ===========================================================================
+
+
+class DatabaseAccessor:
+    """Thread-safe SQLite accessor with consistent locking.
+
+    Wraps all connection access behind a single lock to prevent concurrent
+    write corruption and lock-order inversions (C1, C3 fixes).
+    """
+
+    def __init__(self, conn, lock):
+        self._conn = conn
+        self._lock = lock
+
+    def execute(self, sql, params=()):
+        with self._lock:
+            return self._conn.execute(sql, params)
+
+    def execute_many(self, sql, params_seq):
+        with self._lock:
+            self._conn.executemany(sql, params_seq)
+
+    def transaction(self, operations):
+        """operations: list of (sql, params) tuples. All-or-nothing."""
+        with self._lock:
+            try:
+                for sql, params in operations:
+                    self._conn.execute(sql, params)
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def commit(self):
+        with self._lock:
+            self._conn.commit()
+
+
+# ===========================================================================
 # PipelineState -- persistent storage
 # ===========================================================================
 
@@ -1749,6 +1986,7 @@ class PipelineState:
         )
         self._lock = threading.RLock()
         self._conn.row_factory = sqlite3.Row
+        self.db = DatabaseAccessor(self._conn, self._lock)
         self._init_tables()
 
     def _init_tables(self) -> None:
@@ -1794,6 +2032,7 @@ class MemoryPipeline:
         self._scheduler: SleepScheduler | None = None
         self._llm_client = None
         self._deep_consolidation: DeepConsolidationEngine | None = None
+        self._background_threads: list[threading.Thread] = []
 
     def initialize(self, session_id: str, **kwargs) -> None:
         """Initialize pipeline state and all organic modules."""
@@ -1801,10 +2040,30 @@ class MemoryPipeline:
             return
         self._session_id = session_id
         db_path = self._config.get("db_path") or None
-        self._state = PipelineState(db_path=db_path)
+        self._background_threads: list[threading.Thread] = []
 
-        self._init_core_layers()
-        self._init_plugin_layers()
+        # C2 fix: close connection on init failure (v2_concurrency)
+        _ff = FeatureFlags()
+        if _ff.is_enabled('v2_concurrency'):
+            try:
+                self._state = PipelineState(db_path=db_path)
+                self._init_core_layers()
+                self._init_plugin_layers()
+            except Exception:
+                if self._state is not None:
+                    self._state.close()
+                    self._state = None
+                raise
+        else:
+            try:
+                self._state = PipelineState(db_path=db_path)
+                self._init_core_layers()
+                self._init_plugin_layers()
+            except Exception:
+                if self._state is not None:
+                    self._state.close()
+                    self._state = None
+                raise
 
         logger.debug("MemoryPipeline initialized (session=%s, layers=%d)",
                       session_id, sum(1 for x in [self._salience, self._engrams,
@@ -1934,6 +2193,14 @@ class MemoryPipeline:
 
     def shutdown(self) -> None:
         """Flush and close pipeline state."""
+        # H6 fix: join background threads before closing state (v2_concurrency)
+        _ff = FeatureFlags()
+        if _ff.is_enabled('v2_concurrency'):
+            for t in getattr(self, '_background_threads', []):
+                t.join(timeout=5.0)
+        else:
+            for t in getattr(self, '_background_threads', []):
+                t.join(timeout=5.0)
         if self._state is not None:
             self._state.close()
             self._state = None
@@ -2136,11 +2403,30 @@ class MemoryPipeline:
             # Emotion-modulated engram decay
             if self._engrams and self._state:
                 try:
-                    decay_affected = self._engrams.apply_decay(
-                        self._state,
-                        hours_elapsed=1.0,
-                        emotional_valence=result.emotion,
-                    )
+                    _ff8b = FeatureFlags()
+                    if _ff8b.is_enabled('v2_emotion_decay'):
+                        # FIX 8 (M2): Use per-memory emotion, not global
+                        with self._state._lock:
+                            _erows = self._state._conn.execute(
+                                "SELECT memory_ref, emotional_valence "
+                                "FROM engram_strengths "
+                                "WHERE emotional_valence != 0.0"
+                            ).fetchall()
+                        _valences = {
+                            r["memory_ref"]: r["emotional_valence"]
+                            for r in _erows
+                        }
+                        decay_affected = self._engrams.apply_decay_with_emotion(
+                            self._state,
+                            hours_elapsed=1.0,
+                            emotional_valences=_valences,
+                        )
+                    else:
+                        decay_affected = self._engrams.apply_decay(
+                            self._state,
+                            hours_elapsed=1.0,
+                            emotional_valence=result.emotion,
+                        )
                     meta["decay_affected"] = decay_affected
                 except Exception as e:
                     logger.debug("Emotion-modulated engram decay failed: %s", e)
@@ -2480,7 +2766,8 @@ class MemoryPipeline:
                 with self._state._lock:
                     self._state._conn.execute(
                         "UPDATE schemas SET "
-                        "confidence = MIN(1.0, confidence + 0.02) "
+                        "confidence = MIN(1.0, confidence + 0.02), "
+                        "updated_at = CURRENT_TIMESTAMP "
                         "WHERE confidence > 0.5"
                     )
                     self._state._conn.commit()

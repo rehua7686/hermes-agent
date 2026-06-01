@@ -269,6 +269,12 @@ class HolographicMemoryProvider(MemoryProvider):
                 logger.debug("Holographic memory_write mirror failed: %s", e)
 
     def shutdown(self) -> None:
+        # H-RT4 fix: close DB connections before releasing references
+        if self._store is not None:
+            try:
+                self._store.close()
+            except Exception:
+                pass
         self._store = None
         self._retriever = None
 
