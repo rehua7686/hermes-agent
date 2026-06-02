@@ -2854,7 +2854,7 @@ class SlackAdapter(BasePlatformAdapter):
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": original_text or "Confirmation prompt",
+                    "text": (original_text[:2900] + "\u2026") if len(original_text) > 2900 else (original_text or "Confirmation prompt"),
                 },
             },
             {
@@ -2965,7 +2965,7 @@ class SlackAdapter(BasePlatformAdapter):
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": original_text or "Command approval request",
+                    "text": (original_text[:2900] + "\u2026") if len(original_text) > 2900 else (original_text or "Command approval request"),
                 },
             },
             {
