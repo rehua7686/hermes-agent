@@ -16,10 +16,9 @@
 #   first arg is an executable    → exec it directly (sleep, bash, sh, …)
 #   first arg is anything else    → exec `hermes <args>` (subcommand passthrough)
 #
-# Drop to hermes via s6-setuidgid, but skip it when already non-root.
+# We drop to the hermes user via `s6-setuidgid` so the supervised
+# workload runs unprivileged (UID 10000 by default).
 set -e
-
-drop() { [ "$(id -u)" = 0 ] && set -- s6-setuidgid hermes "$@"; exec "$@"; }
 
 # HOME comes through with-contenv as /root (the /init context). Override
 # to the hermes user's home before dropping privileges so libraries that
@@ -32,13 +31,13 @@ cd /opt/data
 . /opt/hermes/.venv/bin/activate
 
 if [ $# -eq 0 ]; then
-    drop hermes
+    exec s6-setuidgid hermes hermes
 fi
 
 if command -v "$1" >/dev/null 2>&1; then
     # Bare executable — pass through directly.
-    drop "$@"
+    exec s6-setuidgid hermes "$@"
 fi
 
 # Hermes subcommand pass-through.
-drop hermes "$@"
+exec s6-setuidgid hermes hermes "$@"
