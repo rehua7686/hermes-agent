@@ -48,7 +48,6 @@ export type CommandDispatchResponse =
   | { target: string; type: 'alias' }
   | { message?: string; name: string; type: 'skill' }
   | { message: string; notice?: string; type: 'send' }
-  | { message: string; notice?: string; type: 'prefill' }
 
 // ── Config ───────────────────────────────────────────────────────────
 
@@ -63,12 +62,6 @@ export interface ConfigDisplayConfig {
   show_reasoning?: boolean
   streaming?: boolean
   thinking_mode?: string
-  /**
-   * Nudge the user toward the /agents spawn-tree dashboard the first time a
-   * turn starts delegating, via a one-time transient activity hint.  Opens
-   * nothing — just advertises the command.  Default true.
-   */
-  tui_agents_nudge?: boolean
   tui_auto_resume_recent?: boolean
   tui_compact?: boolean
   /** Legacy alias for display.mouse_tracking. */

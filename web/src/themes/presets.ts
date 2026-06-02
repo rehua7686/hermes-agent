@@ -51,7 +51,6 @@ export const defaultTheme: DashboardTheme = {
   },
   typography: DEFAULT_TYPOGRAPHY,
   layout: DEFAULT_LAYOUT,
-  terminalBackground: "#000000",
 };
 
 export const midnightTheme: DashboardTheme = {

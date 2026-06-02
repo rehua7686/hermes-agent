@@ -6,7 +6,6 @@ import { createInterface } from 'node:readline'
 
 import type { GatewayEvent } from './gatewayTypes.js'
 import { CircularBuffer } from './lib/circularBuffer.js'
-import { recordParentLifecycle } from './lib/parentLog.js'
 
 const MAX_GATEWAY_LOG_LINES = 200
 const MAX_LOG_LINE_BYTES = 4096
@@ -238,7 +237,7 @@ export class GatewayClient extends EventEmitter {
       // readable on slow boots.
       const stderrTail = this.getLogTail(20)
 
-      this.lifecycle(`[startup] timed out waiting for gateway.ready (python=${python}, cwd=${cwd})`)
+      this.pushLog(`[startup] timed out waiting for gateway.ready (python=${python}, cwd=${cwd})`)
       this.publish({
         type: 'gateway.start_timeout',
         payload: { cwd, python, stderr_tail: stderrTail }
@@ -249,7 +248,7 @@ export class GatewayClient extends EventEmitter {
   private handleTransportExit(code: null | number, reason?: string) {
     this.clearReadyTimer()
     this.closeSidecarSocket()
-    this.lifecycle(`[lifecycle] transport exit code=${code ?? 'null'} reason=${reason ?? 'none'}`)
+    this.pushLog(`[lifecycle] transport exit code=${code ?? 'null'} reason=${reason ?? 'none'}`)
     this.rejectPending(new Error(reason || `gateway exited${code === null ? '' : ` (${code})`}`))
 
     if (this.subscribed) {
@@ -336,7 +335,7 @@ export class GatewayClient extends EventEmitter {
     env.PYTHONPATH = pyPath ? `${root}${delimiter}${pyPath}` : root
     this.startReadyTimer(python, cwd)
     this.proc = spawn(python, ['-m', 'tui_gateway.entry'], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] })
-    this.lifecycle(`[lifecycle] spawned gateway child ${describeChild(this.proc)} python=${python} cwd=${cwd}`)
+    this.pushLog(`[lifecycle] spawned gateway child ${describeChild(this.proc)} python=${python} cwd=${cwd}`)
 
     this.stdoutRl = createInterface({ input: this.proc.stdout! })
     this.stdoutRl.on('line', raw => {
@@ -373,7 +372,7 @@ export class GatewayClient extends EventEmitter {
 
       const line = `[spawn] ${err.message}`
 
-      this.lifecycle(`[lifecycle] child error ${describeChild(ownedProc)} message=${err.message}`)
+      this.pushLog(`[lifecycle] child error ${describeChild(ownedProc)} message=${err.message}`)
       this.pushLog(line)
       this.publish({ type: 'gateway.stderr', payload: { line } })
       // Detach the reference up front so the late `exit` event for
@@ -397,7 +396,7 @@ export class GatewayClient extends EventEmitter {
         return
       }
 
-      this.lifecycle(`[lifecycle] child exit ${describeChild(ownedProc)} code=${code ?? 'null'} signal=${signal ?? 'null'}`)
+      this.pushLog(`[lifecycle] child exit ${describeChild(ownedProc)} code=${code ?? 'null'} signal=${signal ?? 'null'}`)
       this.handleTransportExit(code)
     })
   }
@@ -508,7 +507,7 @@ export class GatewayClient extends EventEmitter {
     this.resetStartupState()
 
     if (this.proc && !this.proc.killed && this.proc.exitCode === null) {
-      this.lifecycle(`[lifecycle] replacing live gateway child ${describeChild(this.proc)}`)
+      this.pushLog(`[lifecycle] replacing live gateway child ${describeChild(this.proc)}`)
       this.proc.kill()
     }
 
@@ -563,14 +562,6 @@ export class GatewayClient extends EventEmitter {
 
   private pushLog(line: string) {
     this.logs.push(truncateLine(line))
-  }
-
-  // Death-explaining breadcrumbs (spawn / exit / kill / replace) — kept in the
-  // in-memory tail for /logs AND persisted to the gateway crash log so the
-  // reason survives a parent exit and lands next to the child's SIGTERM panic.
-  private lifecycle(line: string) {
-    this.pushLog(line)
-    recordParentLifecycle(line)
   }
 
   private rejectPending(err: Error) {
@@ -726,7 +717,7 @@ export class GatewayClient extends EventEmitter {
     const proc = this.proc
     const killed = proc?.kill()
 
-    this.lifecycle(`[lifecycle] GatewayClient.kill reason=${reason} ${describeChild(proc)} killResult=${killed ?? 'none'}`)
+    this.pushLog(`[lifecycle] GatewayClient.kill reason=${reason} ${describeChild(proc)} killResult=${killed ?? 'none'}`)
     this.closeGatewaySocket()
     this.closeSidecarSocket()
     this.clearReadyTimer()
