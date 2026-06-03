@@ -400,27 +400,35 @@ class SessionDB:
         self.db_path = db_path or DEFAULT_DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # ── Per-thread SQLite connections (issue #34444) ──
+        # Previously a single shared connection was guarded by self._lock,
+        # which fully serialized ALL writes across every thread — N
+        # concurrent sessions writing transcripts contended on one Python
+        # lock regardless of whether they touched the same rows.
+        #
+        # Each thread now gets its own connection via thread-local storage.
+        # WAL mode + BEGIN IMMEDIATE + the application-level jitter retry in
+        # _execute_write() already coordinate concurrent writers at the
+        # SQLite level (this had to work for the multi-PROCESS case anyway);
+        # giving each thread its own connection lets that coordination
+        # happen without a process-global Python lock in the hot path.
+        #
+        # self._lock now guards only shared bookkeeping (_write_count and
+        # the registry of open connections for close()), NOT the write
+        # transactions themselves.
         self._lock = threading.Lock()
         self._write_count = 0
         self._fts_enabled = False
         self._fts_unavailable_warned = False
+        self._tls = threading.local()
+        # Track every connection we hand out so close() can release them all
+        # (thread-locals are otherwise invisible to other threads).
+        self._all_conns: List[sqlite3.Connection] = []
         try:
-            self._conn = sqlite3.connect(
-                str(self.db_path),
-                check_same_thread=False,
-                # Short timeout — application-level retry with random jitter
-                # handles contention instead of sitting in SQLite's internal
-                # busy handler for up to 30s.
-                timeout=1.0,
-                # auto-starts transactions on DML, which conflicts with our
-                # explicit BEGIN IMMEDIATE.  None = we manage transactions
-                # ourselves.
-                isolation_level=None,
-            )
-            self._conn.row_factory = sqlite3.Row
-            apply_wal_with_fallback(self._conn, db_label="state.db")
-            self._conn.execute("PRAGMA foreign_keys=ON")
-
+            # Eagerly create the creating thread's connection and run schema
+            # init on it (init must happen exactly once, before any other
+            # thread opens a connection against the same file).
+            self._new_connection()
             self._init_schema()
         except Exception as exc:
             # Capture the cause so /resume and friends can surface WHY the
@@ -437,6 +445,52 @@ class SessionDB:
             # ``hermes_state._set_last_init_error(None)`` explicitly.
             _set_last_init_error(f"{type(exc).__name__}: {exc}")
             raise
+
+    # ── Per-thread connection management (issue #34444) ──
+
+    def _new_connection(self) -> sqlite3.Connection:
+        """Open and configure a fresh SQLite connection for the current thread.
+
+        Stores it in thread-local storage and registers it in ``_all_conns``
+        so :meth:`close` can release connections opened by other threads.
+        Connection configuration mirrors the original single-connection setup
+        exactly (autocommit, short timeout, WAL, foreign keys, Row factory).
+        """
+        conn = sqlite3.connect(
+            str(self.db_path),
+            check_same_thread=False,
+            # Short timeout — application-level retry with random jitter
+            # handles contention instead of sitting in SQLite's internal
+            # busy handler for up to 30s.
+            timeout=1.0,
+            # Autocommit mode: Python's default isolation_level=""
+            # auto-starts transactions on DML, which conflicts with our
+            # explicit BEGIN IMMEDIATE.  None = we manage transactions
+            # ourselves.
+            isolation_level=None,
+        )
+        conn.row_factory = sqlite3.Row
+        apply_wal_with_fallback(conn, db_label="state.db")
+        conn.execute("PRAGMA foreign_keys=ON")
+        self._tls.conn = conn
+        with self._lock:
+            self._all_conns.append(conn)
+        return conn
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        """The current thread's SQLite connection.
+
+        Lazily opens a per-thread connection on first access from each
+        thread.  Every existing ``self._conn`` reference transparently
+        resolves to the caller thread's own connection, so concurrent
+        threads no longer share — and no longer serialize on — a single
+        connection.
+        """
+        conn = getattr(self._tls, "conn", None)
+        if conn is None:
+            conn = self._new_connection()
+        return conn
 
     # ── Core write helper ──
 
@@ -551,29 +605,41 @@ class SessionDB:
 
         BEGIN IMMEDIATE acquires the WAL write lock at transaction start
         (not at commit time), so lock contention surfaces immediately.
-        On ``database is locked``, we release the Python lock, sleep a
-        random 20-150ms, and retry — breaking the convoy pattern that
-        SQLite's built-in deterministic backoff creates.
+        On ``database is locked``, we sleep a random 20-150ms and retry —
+        breaking the convoy pattern that SQLite's built-in deterministic
+        backoff creates.
+
+        Each thread uses its own connection (issue #34444), so the
+        transaction itself is NOT wrapped in ``self._lock`` — concurrent
+        threads no longer serialize on a process-global Python lock.
+        Coordination between competing writers (threads and processes alike)
+        happens at the SQLite level via WAL + BEGIN IMMEDIATE + this retry
+        loop.  ``self._lock`` now guards only the shared ``_write_count``.
 
         Returns whatever *fn* returns.
         """
         last_err: Optional[Exception] = None
+        conn = self._conn  # thread-local connection
         for attempt in range(self._WRITE_MAX_RETRIES):
             try:
-                with self._lock:
-                    self._conn.execute("BEGIN IMMEDIATE")
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    result = fn(conn)
+                    conn.commit()
+                except BaseException:
                     try:
-                        result = fn(self._conn)
-                        self._conn.commit()
-                    except BaseException:
-                        try:
-                            self._conn.rollback()
-                        except Exception:
-                            pass
-                        raise
-                # Success — periodic best-effort checkpoint.
-                self._write_count += 1
-                if self._write_count % self._CHECKPOINT_EVERY_N_WRITES == 0:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    raise
+                # Success — periodic best-effort checkpoint.  The counter is
+                # shared across threads, so guard just the increment.
+                with self._lock:
+                    self._write_count += 1
+                    do_checkpoint = (
+                        self._write_count % self._CHECKPOINT_EVERY_N_WRITES == 0
+                    )
+                if do_checkpoint:
                     self._try_wal_checkpoint()
                 return result
             except sqlite3.OperationalError as exc:
@@ -603,32 +669,45 @@ class SessionDB:
         connections.
         """
         try:
-            with self._lock:
-                result = self._conn.execute(
-                    "PRAGMA wal_checkpoint(PASSIVE)"
-                ).fetchone()
-                if result and result[1] > 0:
-                    logger.debug(
-                        "WAL checkpoint: %d/%d pages checkpointed",
-                        result[2], result[1],
-                    )
+            # Uses this thread's own connection; no cross-thread lock needed.
+            result = self._conn.execute(
+                "PRAGMA wal_checkpoint(PASSIVE)"
+            ).fetchone()
+            if result and result[1] > 0:
+                logger.debug(
+                    "WAL checkpoint: %d/%d pages checkpointed",
+                    result[2], result[1],
+                )
         except Exception:
             pass  # Best effort — never fatal.
 
     def close(self):
-        """Close the database connection.
+        """Close all per-thread database connections.
 
-        Attempts a PASSIVE WAL checkpoint first so that exiting processes
-        help keep the WAL file from growing unbounded.
+        Attempts a PASSIVE WAL checkpoint on the calling thread's connection
+        first so that exiting processes help keep the WAL file from growing
+        unbounded, then closes every connection handed out to any thread
+        (issue #34444 made connections thread-local, so close() must release
+        the whole registry, not just one).
         """
         with self._lock:
-            if self._conn:
-                try:
-                    self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                except Exception:
-                    pass
-                self._conn.close()
-                self._conn = None
+            conns = list(self._all_conns)
+            self._all_conns.clear()
+        # Checkpoint once on whichever connection belongs to this thread.
+        own = getattr(self._tls, "conn", None)
+        if own is not None:
+            try:
+                own.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            except Exception:
+                pass
+        for conn in conns:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        # Drop this thread's reference so a later access re-opens cleanly.
+        if hasattr(self._tls, "conn"):
+            self._tls.conn = None
 
     @staticmethod
     def _parse_schema_columns(schema_sql: str) -> Dict[str, Dict[str, str]]:
