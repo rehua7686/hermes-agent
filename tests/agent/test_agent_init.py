@@ -18,6 +18,7 @@ def make_agent():
     agent._base_url_lower = ""
     agent._is_azure_openai_url = lambda: False
     agent._is_direct_openai_url = lambda: False
+    agent._provider_model_requires_responses_api = lambda: False
     agent._ensure_lmstudio_runtime_loaded = lambda _config_context_length: None
     return agent
 
