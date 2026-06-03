@@ -346,9 +346,6 @@ export function useVoiceConversation({
           consumePendingResponse()
           resetSpeechBuffer()
           pendingStartRef.current = true
-          setStatus('idle')
-
-          return
         }
       }
 
@@ -356,9 +353,6 @@ export function useVoiceConversation({
         awaitingSpokenResponseRef.current = false
         resetSpeechBuffer()
         pendingStartRef.current = true
-        setStatus('idle')
-
-        return
       }
     }
 
