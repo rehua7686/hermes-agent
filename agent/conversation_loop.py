@@ -494,6 +494,7 @@ def run_conversation(
 
     # Initialize conversation (copy to avoid mutating the caller's list)
     messages = list(conversation_history) if conversation_history else []
+    background_review_baseline = list(messages)
 
     # Hydrate todo store from conversation history (gateway creates a fresh
     # AIAgent per message, so the in-memory store is empty -- we need to
@@ -4717,6 +4718,7 @@ def run_conversation(
                 messages_snapshot=list(messages),
                 review_memory=_should_review_memory,
                 review_skills=_should_review_skills,
+                baseline_snapshot=background_review_baseline + list(messages),
             )
         except Exception:
             pass  # Background review is best-effort

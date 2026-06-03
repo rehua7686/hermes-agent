@@ -1353,6 +1353,7 @@ class AIAgent:
         messages_snapshot: List[Dict],
         review_memory: bool = False,
         review_skills: bool = False,
+        baseline_snapshot: Optional[List[Dict]] = None,
     ) -> None:
         """Spawn the background memory/skill review thread.
 
@@ -1368,6 +1369,7 @@ class AIAgent:
             messages_snapshot,
             review_memory=review_memory,
             review_skills=review_skills,
+            baseline_snapshot=baseline_snapshot,
         )
         t = threading.Thread(target=target, daemon=True, name="bg-review")
         t.start()
