@@ -3386,7 +3386,7 @@ async function startHermes() {
       mode: 'local',
       source: 'local',
       token,
-      wsUrl: `ws://127.0.0.1:${port}/api/ws?token=${encodeURIComponent(token)}`,
+      wsUrl: buildGatewayWsUrl(baseUrl, token),
       logs: hermesLog.slice(-80),
       ...getWindowState()
     }
