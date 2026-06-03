@@ -67,8 +67,10 @@ def _reset_last_init_error():
 def _reset_wal_fallback_warned_paths():
     """Reset the WAL-fallback warned-paths set so dedup doesn't leak between tests."""
     hermes_state._wal_fallback_warned_paths.clear()
+    hermes_state._wal_delete_fallback_failed_db_labels.clear()
     yield
     hermes_state._wal_fallback_warned_paths.clear()
+    hermes_state._wal_delete_fallback_failed_db_labels.clear()
 
 
 class TestApplyWalWithFallback:
@@ -223,6 +225,159 @@ class TestApplyWalWithFallback:
             f"{[r.getMessage() for r in warnings]}"
         )
 
+    def test_falls_back_when_delete_pragma_also_fails(self, tmp_path, caplog):
+        """WAL-incompat FS that ALSO rejects DELETE — must not crash callers.
+
+        Scenario: ``PRAGMA journal_mode=WAL`` raises a recognized WAL-incompat
+        marker (``locking protocol``), so the code legitimately falls back to
+        DELETE.  But the DELETE pragma *also* raises ``disk I/O error`` (observed
+        on APFS external SSDs under heavy contention).  The connection's default
+        journal_mode is already DELETE, so it is still usable; propagating the
+        DELETE failure would crash SessionDB / kanban_db / ResponseStore /
+        holographic memory.  Returns ``"delete"`` and logs one WARNING per
+        db_label.
+
+        Note: a *bare* ``disk I/O error`` on the WAL pragma alone must instead
+        re-raise (transient EIO is not a permanent WAL-incompat marker — see
+        ``test_reraises_on_disk_io_error``).  This test therefore drives WAL
+        with ``locking protocol`` and only DELETE with ``disk I/O error``.
+        """
+        delete_attempts = [0]
+
+        class _DeletePragmaFailsConnection(sqlite3.Connection):
+            def execute(self, sql, *args, **kwargs):  # type: ignore[override]
+                lowered = sql.lower().replace(" ", "")
+                if "journal_mode=wal" in lowered:
+                    raise sqlite3.OperationalError("locking protocol")
+                if "journal_mode=delete" in lowered:
+                    delete_attempts[0] += 1
+                    raise sqlite3.OperationalError("disk I/O error")
+                # Bare PRAGMA journal_mode reads (probe, on-disk check,
+                # contract read-back) also fail with disk I/O error so the
+                # function falls through to the "delete" default.
+                if "journal_mode" in lowered:
+                    raise sqlite3.OperationalError("disk I/O error")
+                return super().execute(sql, *args, **kwargs)
+
+        conn = sqlite3.connect(
+            str(tmp_path / "apfs.db"),
+            factory=_DeletePragmaFailsConnection,
+            isolation_level=None,
+        )
+        with caplog.at_level("WARNING", logger="hermes_state"):
+            mode = apply_wal_with_fallback(conn, db_label="apfs-test.db")
+
+        assert mode == "delete"
+        # The DELETE pragma was attempted exactly once (its failure is what
+        # this test exercises).
+        assert delete_attempts[0] == 1
+
+        # Two warnings: one for WAL fallback, one for DELETE-also-failed
+        msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        wal_warnings = [m for m in msgs if "apfs-test.db" in m and "WAL" in m]
+        delete_warnings = [
+            m for m in msgs if "apfs-test.db" in m and "both WAL and DELETE journal_mode failed" in m
+        ]
+        assert len(wal_warnings) >= 1
+        assert len(delete_warnings) == 1
+        assert "disk I/O error" in delete_warnings[0]
+
+        # Connection is still usable for non-journal_mode SQL
+        conn.execute("CREATE TABLE t (x INTEGER)")
+        conn.execute("INSERT INTO t VALUES (1)")
+        assert list(conn.execute("SELECT x FROM t"))[0][0] == 1
+        conn.close()
+
+    def test_both_pragmas_fail_but_readback_reports_actual_mode(self, tmp_path, caplog):
+        """When both PRAGMA writes fail but PRAGMA journal_mode READ succeeds,
+        the function returns the connection's actual journal_mode — honoring
+        the docstring contract that the returned value reflects reality.
+
+        Regression guard for Copilot's "contract violation" finding on
+        #30823: previously the function returned a hardcoded ``"delete"``
+        even when the DELETE PRAGMA had raised.  On a connection whose
+        underlying journal_mode is something other than ``delete`` (e.g.
+        a previously-set ``memory`` mode that survived the failed writes),
+        that string was a lie.
+        """
+
+        class _WritesFailReadsSucceedConnection(sqlite3.Connection):
+            def execute(self, sql, *args, **kwargs):  # type: ignore[override]
+                # Block PRAGMA WRITES (journal_mode=X) but allow the
+                # bare PRAGMA READ (journal_mode without `=`).  WAL fails
+                # with a recognized WAL-incompat marker so the fallback
+                # engages (a bare "disk I/O error" on WAL would re-raise —
+                # see test_reraises_on_disk_io_error); DELETE fails with
+                # disk I/O error to drive the both-fail read-back path.
+                lowered = sql.lower().replace(" ", "")
+                if "journal_mode=wal" in lowered:
+                    raise sqlite3.OperationalError("locking protocol")
+                if "journal_mode=delete" in lowered:
+                    raise sqlite3.OperationalError("disk I/O error")
+                return super().execute(sql, *args, **kwargs)
+
+        conn = sqlite3.connect(
+            str(tmp_path / "readback.db"),
+            factory=_WritesFailReadsSucceedConnection,
+            isolation_level=None,
+        )
+        with caplog.at_level("WARNING", logger="hermes_state"):
+            mode = apply_wal_with_fallback(conn, db_label="readback.db")
+
+        # On a fresh SQLite connection the default journal_mode is "delete";
+        # the read-back returns it.  The important contract guarantee is
+        # that the function consulted the connection rather than guessing.
+        assert mode == "delete"
+        # And the both-fail warning still fired.
+        msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any(
+            "readback.db" in m and "both WAL and DELETE journal_mode failed" in m
+            for m in msgs
+        )
+        conn.close()
+
+    def test_delete_fallback_failure_warning_deduplicated_per_db_label(
+        self, tmp_path, caplog
+    ):
+        """Repeated calls with the same db_label log exactly ONE DELETE-failed warning.
+
+        kanban_db.connect() runs on every kanban operation; without dedup,
+        APFS-external-SSD users would see hundreds of identical warnings.
+        """
+
+        class _BothPragmasFailConnection(sqlite3.Connection):
+            def execute(self, sql, *args, **kwargs):  # type: ignore[override]
+                lowered = sql.lower().replace(" ", "")
+                # WAL fails with a recognized WAL-incompat marker (so the
+                # fallback engages); DELETE and bare reads fail with disk
+                # I/O error (so the function falls through to "delete").
+                if "journal_mode=wal" in lowered:
+                    raise sqlite3.OperationalError("locking protocol")
+                if "journal_mode" in lowered:
+                    raise sqlite3.OperationalError("disk I/O error")
+                return super().execute(sql, *args, **kwargs)
+
+        with caplog.at_level("WARNING", logger="hermes_state"):
+            for i in range(3):
+                conn = sqlite3.connect(
+                    str(tmp_path / f"apfs-dup-{i}.db"),
+                    factory=_BothPragmasFailConnection,
+                    isolation_level=None,
+                )
+                mode = apply_wal_with_fallback(conn, db_label="apfs-shared.db")
+                assert mode == "delete"
+                conn.close()
+
+        delete_warnings = [
+            r for r in caplog.records
+            if r.levelname == "WARNING"
+            and "apfs-shared.db" in r.getMessage()
+            and "both WAL and DELETE journal_mode failed" in r.getMessage()
+        ]
+        assert len(delete_warnings) == 1, (
+            f"Expected 1 deduplicated DELETE-failed warning, got {len(delete_warnings)}"
+        )
+
     def test_warning_fires_independently_per_db_label(self, tmp_path, caplog):
         """Different db_labels each get their own one warning (not globally dedup'd)."""
         with caplog.at_level("WARNING", logger="hermes_state"):
@@ -280,24 +435,24 @@ class TestGetLastInitError:
     def test_captures_cause_on_failed_init(self, tmp_path):
         """When SessionDB() raises, the cause is preserved for slash commands.
 
-        Simulates a filesystem where BOTH WAL and DELETE journal modes fail —
-        e.g. a read-only mount where no ``PRAGMA journal_mode=X`` works.  The
-        fallback tries DELETE and also gets rejected; the exception bubbles
-        out of ``SessionDB.__init__`` and the cause is captured.
+        Simulates a filesystem failure unrelated to the WAL fallback path —
+        e.g. ``foreign_keys=ON`` rejected by a read-only or seriously
+        damaged DB.  The exception bubbles out of ``SessionDB.__init__``
+        and the cause is captured for /resume to surface.
         """
         target = tmp_path / "broken.db"
         real_connect = sqlite3.connect
 
-        class _BothPragmasFailConnection(sqlite3.Connection):
+        class _ForeignKeysFailConnection(sqlite3.Connection):
             def execute(self, sql, *args, **kwargs):  # type: ignore[override]
-                if "journal_mode" in sql.lower():
+                if "foreign_keys" in sql.lower():
                     raise sqlite3.OperationalError(
-                        "locking protocol: read-only filesystem"
+                        "attempt to write a readonly database"
                     )
                 return super().execute(sql, *args, **kwargs)
 
         def gated_connect(*args, **kwargs):
-            return real_connect(str(target), factory=_BothPragmasFailConnection, **kwargs)
+            return real_connect(str(target), factory=_ForeignKeysFailConnection, **kwargs)
 
         with patch("hermes_state.sqlite3.connect", side_effect=gated_connect):
             with pytest.raises(sqlite3.OperationalError):
@@ -306,7 +461,50 @@ class TestGetLastInitError:
         cause = get_last_init_error()
         assert cause is not None
         assert "OperationalError" in cause
-        assert "locking protocol" in cause
+        assert "readonly" in cause
+
+    def test_sessiondb_survives_when_both_journal_pragmas_fail(self, tmp_path):
+        """APFS external SSDs reject both journal_mode pragmas — SessionDB must survive.
+
+        Regression guard for #30816: before the fix, the uncaught DELETE
+        fallback inside ``apply_wal_with_fallback`` propagated out of
+        ``SessionDB.__init__`` and every caller (/resume, /title, /history,
+        kanban dispatcher, ResponseStore, holographic memory) silently broke.
+        """
+        target = tmp_path / "apfs.db"
+        real_connect = sqlite3.connect
+
+        class _BothPragmasFailConnection(sqlite3.Connection):
+            def execute(self, sql, *args, **kwargs):  # type: ignore[override]
+                lowered = sql.lower().replace(" ", "")
+                # WAL fails with a recognized WAL-incompat marker (engages
+                # the fallback); DELETE and bare journal_mode reads fail with
+                # disk I/O error.  apply_wal_with_fallback must absorb all of
+                # this and let SessionDB.__init__ proceed.
+                if "journal_mode=wal" in lowered:
+                    raise sqlite3.OperationalError("locking protocol")
+                if "journal_mode" in lowered:
+                    raise sqlite3.OperationalError("disk I/O error")
+                return super().execute(sql, *args, **kwargs)
+
+        def gated_connect(*args, **kwargs):
+            return real_connect(
+                str(target), factory=_BothPragmasFailConnection, **kwargs
+            )
+
+        with patch("hermes_state.sqlite3.connect", side_effect=gated_connect):
+            db = SessionDB(db_path=target)
+
+        try:
+            # SessionDB initialized successfully despite both pragmas failing
+            assert get_last_init_error() is None
+            # End-to-end write/read still works
+            db.create_session(session_id="s30816", source="cli", model="test")
+            sess = db.get_session("s30816")
+            assert sess is not None
+            assert sess["source"] == "cli"
+        finally:
+            db.close()
 
 
 class TestFormatSessionDbUnavailable:

@@ -70,6 +70,7 @@ _last_init_error_lock = threading.Lock()
 # hermes_cli/kanban_db.py for ~30 call sites) would re-log the same
 # filesystem-incompat warning on every connection, filling errors.log.
 _wal_fallback_warned_paths: set[str] = set()
+_wal_delete_fallback_failed_db_labels: set[str] = set()
 _wal_fallback_warned_lock = threading.Lock()
 
 _FTS_TRIGGERS = (
@@ -161,12 +162,29 @@ def apply_wal_with_fallback(
 ) -> str:
     """Set ``journal_mode=WAL`` on ``conn``, falling back to DELETE on failure.
 
-    Returns the journal mode actually set (``"wal"`` or ``"delete"``).
+    Returns the journal mode now in effect on the connection
+    (``"wal"`` or ``"delete"``).  In the rare both-pragmas-fail case
+    (see below), the value is read back from ``PRAGMA journal_mode``;
+    if even that read fails, ``"delete"`` is returned because that is
+    the SQLite default and no PRAGMA we issued ever succeeded.
 
     On WAL-incompatible filesystems (NFS, SMB, some FUSE), SQLite raises
-    ``OperationalError("locking protocol")`` when setting WAL.  We fall
-    back to DELETE mode — the pre-WAL default, which works on NFS — and
-    log one WARNING explaining why.
+    ``OperationalError("locking protocol")`` (or ``"not authorized"``) when
+    setting WAL.  We fall back to DELETE mode — the pre-WAL default, which
+    works on NFS — and log one WARNING explaining why.  A bare transient
+    ``disk I/O error`` on the WAL pragma alone is NOT treated as a WAL-incompat
+    marker and is re-raised so the caller can retry (downgrading on transient
+    EIO risks mixed-journal-mode cross-process corruption — see
+    ``_WAL_INCOMPAT_MARKERS`` and tests/test_hermes_state_wal_fallback.py::
+    test_reraises_on_disk_io_error).
+
+    When WAL fails for a recognized incompat reason and the ``DELETE``
+    fallback pragma *also* raises (e.g. APFS external SSDs under heavy
+    contention raising ``disk I/O error`` on the DELETE pragma), we log a
+    second WARNING and continue with whatever the connection's journal_mode
+    actually is (typically the SQLite default ``delete``), because the
+    connection is still usable for reads/writes and propagating would crash
+    every caller.
 
     The WARNING is deduplicated per ``db_label``: repeated connections
     to the same underlying DB (e.g. kanban_db.connect() which is called
@@ -201,7 +219,26 @@ def apply_wal_with_fallback(
         if existing == "wal":
             raise
         _log_wal_fallback_once(db_label, exc)
-        conn.execute("PRAGMA journal_mode=DELETE")
+        try:
+            conn.execute("PRAGMA journal_mode=DELETE")
+        except sqlite3.OperationalError as delete_exc:
+            # Some filesystems (e.g. APFS external SSDs under heavy
+            # contention) reject BOTH WAL and DELETE journal_mode pragmas
+            # with "disk I/O error".  The connection's default journal
+            # mode is already DELETE, so propagating this would crash
+            # every caller (SessionDB, kanban_db, ResponseStore, holographic
+            # memory store) when in practice the connection is still
+            # usable for reads/writes.  Log once and continue.
+            _log_wal_delete_fallback_failed_once(db_label, exc, delete_exc)
+            # Honor the docstring contract: return the journal_mode
+            # actually in effect, not a guess.  If the read also fails,
+            # fall through to "delete" (SQLite's default) below.
+            try:
+                row = conn.execute("PRAGMA journal_mode").fetchone()
+                if row and row[0]:
+                    return str(row[0]).lower()
+            except sqlite3.OperationalError:
+                pass
         return "delete"
 
 
@@ -225,6 +262,36 @@ def _log_wal_fallback_once(db_label: str, exc: Exception) -> None:
         db_label,
         exc,
     )
+
+
+def _log_wal_delete_fallback_failed_once(
+    db_label: str,
+    wal_exc: Exception,
+    delete_exc: Exception,
+) -> None:
+    """Log a single WARNING per (process, db_label) when both WAL and DELETE fail.
+
+    Observed on APFS external SSDs where both ``PRAGMA journal_mode=WAL``
+    and ``PRAGMA journal_mode=DELETE`` raise ``disk I/O error``.  The
+    connection's default journal mode is already DELETE, so reads/writes
+    still work; we just couldn't change the pragma.  Dedup on db_label
+    so kanban_db.connect()'s per-operation pattern doesn't flood the log.
+    """
+    with _wal_fallback_warned_lock:
+        if db_label in _wal_delete_fallback_failed_db_labels:
+            return
+        _wal_delete_fallback_failed_db_labels.add(db_label)
+    logger.warning(
+        "%s: both WAL and DELETE journal_mode failed "
+        "(WAL: %s; DELETE: %s) — continuing with the connection's "
+        "default journal mode.  Typically seen on APFS external SSDs "
+        "under heavy contention.  This warning fires once per process "
+        "per database.",
+        db_label,
+        wal_exc,
+        delete_exc,
+    )
+
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
