@@ -1605,6 +1605,161 @@ class TestRunJobConfigEnvVarExpansion:
         assert kwargs["model"] == "${_HERMES_TEST_CRON_UNSET_VAR}"
 
 
+class TestRunJobConfigCustomProviderPropagation:
+    """Verify cron propagates model.api_key / model.base_url from config.yaml
+    to resolve_runtime_provider() when the job lacks explicit overrides — see
+    issue #32239. Without this, a job that inherits ``provider: custom`` from
+    config.yaml falls through every branch of resolve_runtime_provider and
+    errors with ``API key required`` even though interactive CLI works.
+    """
+
+    _RUNTIME = {
+        "api_key": "test-key",
+        "base_url": "https://custom.example.invalid/v1",
+        "provider": "custom",
+        "api_mode": "chat_completions",
+    }
+
+    def test_model_base_url_and_api_key_propagated_when_job_lacks_overrides(
+        self, tmp_path
+    ):
+        (tmp_path / "config.yaml").write_text(
+            "model:\n"
+            "  default: some-model\n"
+            "  provider: custom\n"
+            "  base_url: https://custom.example.invalid/v1\n"
+            "  api_key: sk-cfg-key\n",
+            encoding="utf-8",
+        )
+        job = {"id": "custom-job", "name": "custom test", "prompt": "hi"}
+        fake_db = MagicMock()
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("hermes_cli.runtime_provider.resolve_runtime_provider",
+                   return_value=self._RUNTIME) as mock_resolve, \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+            success, _, _, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        kwargs = mock_resolve.call_args.kwargs
+        assert kwargs.get("explicit_base_url") == "https://custom.example.invalid/v1", (
+            f"Expected model.base_url to be propagated as explicit_base_url, "
+            f"got kwargs={kwargs!r}"
+        )
+        assert kwargs.get("explicit_api_key") == "sk-cfg-key", (
+            f"Expected model.api_key to be propagated as explicit_api_key, "
+            f"got kwargs={kwargs!r}"
+        )
+
+    def test_job_base_url_wins_and_config_api_key_is_inherited(self, tmp_path):
+        """When the job pins a base_url but doesn't ship its own api_key,
+        the config ``model.api_key`` is still propagated. Without this,
+        a job pinning its own endpoint would fall through to env-only
+        lookups and error with "API key required" — the same failure
+        mode the unpinned-base_url branch already fixes. See #32239
+        reviewer feedback on PR #32256."""
+        (tmp_path / "config.yaml").write_text(
+            "model:\n"
+            "  default: some-model\n"
+            "  provider: custom\n"
+            "  base_url: https://config.example.invalid/v1\n"
+            "  api_key: sk-cfg-key\n",
+            encoding="utf-8",
+        )
+        job = {
+            "id": "override-job",
+            "name": "override test",
+            "prompt": "hi",
+            "base_url": "https://job.example.invalid/v1",
+        }
+        fake_db = MagicMock()
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("hermes_cli.runtime_provider.resolve_runtime_provider",
+                   return_value=self._RUNTIME) as mock_resolve, \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+            run_job(job)
+
+        kwargs = mock_resolve.call_args.kwargs
+        # Job-level base_url wins.
+        assert kwargs.get("explicit_base_url") == "https://job.example.invalid/v1"
+        # Config api_key is still inherited so the job-pinned endpoint can
+        # authenticate without each job duplicating the key.
+        assert kwargs.get("explicit_api_key") == "sk-cfg-key"
+
+    def test_no_api_key_propagation_when_no_base_url_in_play(self, tmp_path):
+        """If config.yaml has an api_key but no base_url and the job
+        doesn't pin one either, don't force ``explicit_api_key`` into
+        ``resolve_runtime_provider()`` — there's no custom endpoint to
+        scope it to, and forcing it can perturb non-custom provider
+        resolution precedence."""
+        (tmp_path / "config.yaml").write_text(
+            "model:\n"
+            "  default: some-model\n"
+            "  provider: openrouter\n"
+            "  api_key: sk-cfg-key\n",
+            encoding="utf-8",
+        )
+        job = {"id": "no-base-url-job", "name": "no base url", "prompt": "hi"}
+        fake_db = MagicMock()
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("hermes_cli.runtime_provider.resolve_runtime_provider",
+                   return_value=self._RUNTIME) as mock_resolve, \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+            run_job(job)
+
+        kwargs = mock_resolve.call_args.kwargs
+        assert "explicit_base_url" not in kwargs
+        assert "explicit_api_key" not in kwargs
+
+    def test_no_propagation_when_config_model_is_a_plain_string(self, tmp_path):
+        """When ``model:`` is a plain string (legacy shape) there are no
+        base_url/api_key fields to propagate, and the scheduler must not
+        crash trying to read them."""
+        (tmp_path / "config.yaml").write_text(
+            "model: just-a-model-name\n", encoding="utf-8"
+        )
+        job = {"id": "plain-job", "name": "plain test", "prompt": "hi"}
+        fake_db = MagicMock()
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("hermes_cli.runtime_provider.resolve_runtime_provider",
+                   return_value=self._RUNTIME) as mock_resolve, \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+            success, _, _, error = run_job(job)
+
+        assert success is True
+        kwargs = mock_resolve.call_args.kwargs
+        assert "explicit_base_url" not in kwargs
+        assert "explicit_api_key" not in kwargs
+
+
 class TestRunJobSkillBacked:
     def test_run_job_preserves_skill_env_passthrough_into_worker_thread(self, tmp_path):
         job = {
