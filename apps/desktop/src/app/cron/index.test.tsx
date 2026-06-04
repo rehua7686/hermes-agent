@@ -43,26 +43,7 @@ afterEach(() => {
 })
 
 describe('CronView message preview', () => {
-  it('opens history from the inline preview action', async () => {
-    const { CronView } = await import('./index')
-
-    render(
-      <MemoryRouter>
-        <CronView onClose={() => {}} />
-      </MemoryRouter>
-    )
-
-    const preview = await screen.findByRole('button', { name: 'Preview messages for Daily briefing' })
-    const actions = screen.getByRole('button', { name: 'Actions for Daily briefing' })
-
-    expect(preview.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-
-    fireEvent.click(preview)
-
-    await waitFor(() => expect(screen.getByRole('dialog').textContent).toContain('daily-briefing'))
-  })
-
-  it('also opens history from the actions menu', async () => {
+  it('keeps history inside the actions menu', async () => {
     const { CronView } = await import('./index')
 
     render(
@@ -72,6 +53,8 @@ describe('CronView message preview', () => {
     )
 
     const actions = await screen.findByRole('button', { name: 'Actions for Daily briefing' })
+
+    expect(screen.queryByRole('button', { name: 'Preview messages for Daily briefing' })).toBeNull()
 
     actions.focus()
     fireEvent.keyDown(actions, { key: 'Enter' })

@@ -26,7 +26,7 @@ import {
   triggerCronJob,
   updateCronJob
 } from '@/hermes'
-import { AlertTriangle, Clock, History } from '@/lib/icons'
+import { AlertTriangle, Clock } from '@/lib/icons'
 import { notify, notifyError } from '@/store/notifications'
 
 import { useRefreshHotkey } from '../hooks/use-refresh-hotkey'
@@ -571,16 +571,6 @@ function CronJobRow({
       </button>
 
       <div className="flex shrink-0 items-center gap-0.5">
-        <Button
-          aria-label={`Preview messages for ${jobTitle(job)}`}
-          className="text-muted-foreground hover:text-foreground"
-          onClick={onHistory}
-          size="icon-sm"
-          title="Preview messages"
-          variant="ghost"
-        >
-          <History className="size-3.5" />
-        </Button>
         <CronJobActionsMenu
           busy={busy}
           isPaused={isPaused}
