@@ -1580,6 +1580,14 @@ def check_execute_code_guard(code: str, env_type: str) -> dict:
         return {"approved": True, "message": None}
 
     session_key = get_current_session_key()
+
+    # Permanent allowlist check — respects "Always" from previous approvals.
+    # When a user clicks "Always" in the gateway approval popup, the pattern is
+    # saved to config via approve_permanent() + save_permanent_allowlist().
+    # Subsequent calls should honour that persisted decision. (#39187)
+    if is_approved(session_key, pattern_key):
+        return {"approved": True, "message": None}
+
     # Built only now (past the early-return gates) so the common non-approval
     # paths don't pay to copy a potentially-large script into this string.
     command = f"execute_code <<'PY'\n{code}\nPY"
@@ -1674,9 +1682,9 @@ def check_execute_code_guard(code: str, env_type: str) -> dict:
             "user_consent": False,
         }
 
-    # Approved — one-shot only. Deliberately NO approve_session/approve_permanent:
-    # each execute_code script is distinct arbitrary code, so approval never
-    # persists to future scripts.
+    # Approved — one-shot for this call.  The *permanent* allowlist is checked
+    # earlier (is_approved); this path only fires for scripts not already covered
+    # by a persisted "Always" decision.
     return {"approved": True, "message": None,
             "user_approved": True, "description": description}
 
