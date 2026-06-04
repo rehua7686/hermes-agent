@@ -24,7 +24,7 @@ import urllib.request
 DB_PATH = os.path.join(os.path.expanduser("~/.hermes"), "state.db")
 
 # Config from config.yaml
-EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "http://2080ti:8081")
+EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "http://localhost:8081")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "Qwen3-Embedding-0.6B")
 EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))

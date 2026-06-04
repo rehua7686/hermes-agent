@@ -290,6 +290,8 @@ CREATE TABLE IF NOT EXISTS messages (
     message_embedding BLOB
 );
 
+CREATE INDEX IF NOT EXISTS idx_messages_embedding ON messages(message_embedding) WHERE message_embedding IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS state_meta (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -433,6 +435,7 @@ class SessionDB:
         self._embedding_api_key = None
         self._embedding_dim = 1024
         self._embedding_enabled = False
+        self._http_client = None
         self._try_load_embedding_config()
 
         self._lock = threading.Lock()
@@ -665,37 +668,39 @@ class SessionDB:
         if not text or not text.strip():
             return None
         try:
-            import urllib.request
             import json as _json
+            import struct as _struct
+            import httpx as _httpx
 
             base_url = self._embedding_base_url
             if not base_url:
                 return None
 
+            if self._http_client is None:
+                self._http_client = _httpx.Client(
+                    base_url=base_url,
+                    timeout=_httpx.Timeout(60.0),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {self._embedding_api_key}" if self._embedding_api_key else "",
+                    },
+                )
+
             payload = _json.dumps({
                 "model": self._embedding_model,
-                "input": text[:2048],  # truncate to avoid token limit
+                "input": text[:2048],
                 "encoding_type": "float",
-            }).encode("utf-8")
+            })
 
-            req = urllib.request.Request(
-                f"{base_url}/v1/embeddings",
-                data=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self._embedding_api_key}" if self._embedding_api_key else "",
-                },
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                result = _json.loads(resp.read())
+            resp = self._http_client.post("/v1/embeddings", content=payload)
+            resp.raise_for_status()
+            result = resp.json()
 
             data = result.get("data", [])
             if data and len(data) > 0:
                 embedding = data[0].get("embedding")
                 if embedding and isinstance(embedding, list):
-                    import struct
-                    return struct.pack(f"{len(embedding)}f", *embedding)
+                    return _struct.pack(f"{len(embedding)}f", *embedding)
         except Exception as e:
             logger.debug("Embedding computation failed: %s", e, exc_info=True)
         return None
@@ -3059,7 +3064,7 @@ class SessionDB:
                     with self._lock:
                         cursor = self._conn.execute(
                             "SELECT id, session_id, role, content, timestamp, tool_name, message_embedding "
-                            "FROM messages WHERE message_embedding IS NOT NULL"
+                            "FROM messages WHERE message_embedding IS NOT NULL LIMIT 5000"
                         )
                         all_msgs = [dict(r) for r in cursor.fetchall()]
 
