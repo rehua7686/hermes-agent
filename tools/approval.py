@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 # instantly bypass all approval checks — a prompt-injection escalation path.
 _YOLO_MODE_FROZEN: bool = is_truthy_value(os.getenv("HERMES_YOLO_MODE", ""))
 
+
 # Per-thread/per-task gateway session identity.
 # Gateway runs agent turns concurrently in executor threads, so reading a
 # process-global env var for session identity is racy. Keep env fallback for
@@ -509,9 +510,76 @@ def _approval_key_aliases(pattern_key: str) -> set[str]:
     return _PATTERN_KEY_ALIASES.get(pattern_key, {pattern_key})
 
 
+def _get_approval_language() -> str:
+    """Get the current approval language from config.
+
+    Returns 'zh' if configured, otherwise 'en'.
+    """
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+        lang = (config.get("approvals") or {}).get("language", "")
+        if lang in ("zh", "zh-CN", "zh_CN", "zh-Hans"):
+            return "zh"
+    except Exception:
+        pass
+    return "en"
+
+
+def _translate_description(description: str, lang: str | None = None) -> str:
+    """Translate a dangerous command description to the target language.
+
+    Args:
+        description: The English description string.
+        lang: Target language ('zh' or 'en'). If None, auto-detect from config.
+
+    Returns:
+        The translated description, or the original if no translation exists.
+    """
+    if lang is None:
+        lang = _get_approval_language()
+    if lang == "zh" and description in _DESCRIPTIONS_ZH:
+        return _DESCRIPTIONS_ZH[description]
+    return description
+
+
+def _get_ui_text(key: str, lang: str | None = None) -> str:
+    """Get a localized UI text string.
+
+    Args:
+        key: The UI text key.
+        lang: Target language ('zh' or 'en'). If None, auto-detect.
+
+    Returns:
+        The localized string, or the English default if no translation exists.
+    """
+    if lang is None:
+        lang = _get_approval_language()
+    if lang == "zh" and key in _UI_ZH:
+        return _UI_ZH[key]
+    # English defaults
+    _defaults = {
+        "dangerous_command": "DANGEROUS COMMAND",
+        "once": "once",
+        "session": "session",
+        "always": "always",
+        "deny": "deny",
+        "allowed_once": "✓ Allowed once",
+        "allowed_session": "✓ Allowed for this session",
+        "added_permanent": "✓ Added to permanent allowlist",
+        "denied": "✗ Denied",
+        "cancelled": "✗ Cancelled",
+        "timeout_deny": "⏱ Timeout - denying command",
+        "choice_prompt_always": "Choice [o/s/a/D]: ",
+        "choice_prompt_no_always": "Choice [o/s/D]: ",
+    }
+    return _defaults.get(key, key)
+
+
 # =========================================================================
 # Detection
 # =========================================================================
+
 
 def _normalize_command_for_detection(command: str) -> str:
     """Normalize a command string before dangerous-pattern matching.
@@ -531,8 +599,13 @@ def _normalize_command_for_detection(command: str) -> str:
     return command
 
 
-def detect_dangerous_command(command: str) -> tuple:
+def detect_dangerous_command(command: str, lang: str | None = None) -> tuple:
     """Check if a command matches any dangerous patterns.
+
+    Args:
+        command: The command string to check.
+        lang: Target language for description ('zh' or 'en').
+              If None, auto-detect from config.
 
     Returns:
         (is_dangerous, pattern_key, description) or (False, None, None)
@@ -541,7 +614,8 @@ def detect_dangerous_command(command: str) -> tuple:
     for pattern_re, description in DANGEROUS_PATTERNS_COMPILED:
         if pattern_re.search(command_lower):
             pattern_key = description
-            return (True, pattern_key, description)
+            trans_description = _translate_description(description, lang)
+            return (True, pattern_key, trans_description)
     return (False, None, None)
 
 
@@ -1079,18 +1153,63 @@ def check_dangerous_command(command: str, env_type: str,
 
 
 # =========================================================================
-# Combined pre-exec guard (tirith + dangerous command detection)
+# Tirith rule translations (Chinese)
 # =========================================================================
+_TIRITH_RULES_ZH: dict[str, str] = {
+    # Pipe to interpreter / shell injection
+    "curl_pipe_shell": "将远程内容管道传输到 shell 执行",
+    "pipe_to_interpreter": "将输出管道传输到解释器执行",
+    "wget_pipe_shell": "将 wget 下载内容管道传输到 shell 执行",
+    "process_substitution_shell": "通过进程替换执行 shell 命令",
+    # URL-related
+    "homograph_url": "检测到同形异义 URL（Unicode 混淆）",
+    "shortened_url": "检测到短链接",
+    "suspicious_url": "检测到可疑 URL",
+    # File/network
+    "file_download_exec": "下载并执行远程文件",
+    "sshd_config_change": "修改 SSH 配置",
+    # Injection
+    "terminal_injection": "终端注入攻击",
+    "ansi_injection": "ANSI 转义注入",
+    "backtick_injection": "反引号命令注入",
+    # Credential
+    "credential_exfiltration": "凭证外泄风险",
+    "ssh_key_access": "SSH 密钥访问",
+    # Other
+    "dangerous_environment": "危险环境变量设置",
+    "unsafe_variable_expansion": "不安全变量展开",
+}
+
+_TIRITH_SEVERITY_ZH: dict[str, str] = {
+    "CRITICAL": "致命",
+    "critical": "致命",
+    "HIGH": "高危",
+    "high": "高危",
+    "MEDIUM": "中危",
+    "medium": "中危",
+    "LOW": "低危",
+    "low": "低危",
+    "INFO": "信息",
+    "info": "信息",
+}
+
 
 def _format_tirith_description(tirith_result: dict) -> str:
     """Build a human-readable description from tirith findings.
 
     Includes severity, title, and description for each finding so users
     can make an informed approval decision.
+
+    Translates to Chinese when approvals.language is configured as 'zh'.
     """
+    lang = _get_approval_language()
+    is_zh = (lang == "zh")
+
     findings = tirith_result.get("findings") or []
     if not findings:
         summary = tirith_result.get("summary") or "security issue detected"
+        if is_zh:
+            return f"安全扫描：{summary}"
         return f"Security scan: {summary}"
 
     parts = []
@@ -1098,14 +1217,49 @@ def _format_tirith_description(tirith_result: dict) -> str:
         severity = f.get("severity", "")
         title = f.get("title", "")
         desc = f.get("description", "")
+
+        # Translate severity
+        if is_zh and severity in _TIRITH_SEVERITY_ZH:
+            severity = _TIRITH_SEVERITY_ZH[severity]
+
+        # Translate title based on rule_id if available
+        if is_zh:
+            rule_id = f.get("rule_id", "")
+            if rule_id in _TIRITH_RULES_ZH:
+                title = _TIRITH_RULES_ZH[rule_id]
+            # Also try to translate common English titles as fallback
+            _title_translations = {
+                "Pipe to interpreter": "管道传输到解释器",
+                "Pipe to shell": "管道传输到 shell",
+                "Homograph URL": "同形异义 URL",
+                "Shortened URL": "短链接",
+                "Terminal injection": "终端注入",
+                "Credential exfiltration": "凭证外泄",
+                "SSH key access": "SSH 密钥访问",
+                "Dangerous environment": "危险环境变量",
+                "File download and execution": "下载并执行文件",
+            }
+            if title in _title_translations:
+                title = _title_translations[title]
+
         if title and desc:
-            parts.append(f"[{severity}] {title}: {desc}" if severity else f"{title}: {desc}")
+            if is_zh:
+                parts.append(f"[{severity}] {title}：{desc}" if severity else f"{title}：{desc}")
+            else:
+                parts.append(f"[{severity}] {title}: {desc}" if severity else f"{title}: {desc}")
         elif title:
-            parts.append(f"[{severity}] {title}" if severity else title)
+            if is_zh:
+                parts.append(f"[{severity}] {title}" if severity else title)
+            else:
+                parts.append(f"[{severity}] {title}" if severity else title)
     if not parts:
         summary = tirith_result.get("summary") or "security issue detected"
+        if is_zh:
+            return f"安全扫描：{summary}"
         return f"Security scan: {summary}"
 
+    if is_zh:
+        return "安全扫描 — " + "; ".join(parts)
     return "Security scan — " + "; ".join(parts)
 
 
