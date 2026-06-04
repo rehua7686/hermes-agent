@@ -176,6 +176,24 @@ def test_guard_gateway_user_approves_is_one_shot(gw_session):
     assert A.is_approved(gw_session, "execute_code") is False
 
 
+def test_guard_permanent_allowlist_bypasses_gateway_prompt(gw_session):
+    """When execute_code is in the permanent allowlist (user clicked 'Always'
+    in a previous approval popup), the guard must auto-approve WITHOUT
+    surfacing a gateway prompt.  (#39187)"""
+    # Simulate: user clicked "Always" → pattern saved to permanent allowlist.
+    A.approve_permanent("execute_code")
+    try:
+        # No resolver registered — if the guard still tried to prompt,
+        # it would return pending_approval or block.
+        res = A.check_execute_code_guard("import os; print(1)", "local")
+        assert res["approved"] is True
+        # Must NOT carry user_approved (this path skips the gateway flow).
+        assert res.get("user_approved") is not True
+    finally:
+        with A._lock:
+            A._permanent_approved.discard("execute_code")
+
+
 def test_guard_gateway_user_denies_blocks(gw_session):
     _register_resolver(gw_session, "deny")
     res = A.check_execute_code_guard("import os", "local")
