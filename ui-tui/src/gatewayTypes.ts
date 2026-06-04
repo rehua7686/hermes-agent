@@ -361,6 +361,7 @@ export interface ModelOptionProvider {
   auth_type?: string
   authenticated?: boolean
   is_current?: boolean
+  is_user_defined?: boolean
   key_env?: string
   models?: string[]
   name: string
@@ -373,6 +374,12 @@ export interface ModelOptionsResponse {
   model?: string
   provider?: string
   providers?: ModelOptionProvider[]
+}
+
+export interface FetchModelsResponse {
+  slug?: string
+  models?: string[]
+  total_models?: number
 }
 
 // ── MCP ──────────────────────────────────────────────────────────────
