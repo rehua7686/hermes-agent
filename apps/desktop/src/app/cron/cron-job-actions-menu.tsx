@@ -11,6 +11,7 @@ interface CronJobActions {
   title: string
   onDelete: () => void
   onEdit: () => void
+  onHistory: () => void
   onPauseResume: () => void
   onTrigger: () => void
 }
@@ -27,6 +28,7 @@ export function CronJobActionsMenu({
   isPaused,
   onDelete,
   onEdit,
+  onHistory,
   onPauseResume,
   onTrigger,
   sideOffset = 6,
@@ -35,12 +37,17 @@ export function CronJobActionsMenu({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>{children}</DropdownMenuTrigger>
-      <DropdownMenuContent
-        align={align}
-        aria-label={`Actions for ${title}`}
-        className="w-44"
-        sideOffset={sideOffset}
-      >
+      <DropdownMenuContent align={align} aria-label={`Actions for ${title}`} className="w-44" sideOffset={sideOffset}>
+        <DropdownMenuItem
+          onSelect={() => {
+            triggerHaptic('selection')
+            onHistory()
+          }}
+        >
+          <Codicon name="history" size="0.875rem" />
+          <span>Message history</span>
+        </DropdownMenuItem>
+
         <DropdownMenuItem
           disabled={busy}
           onSelect={() => {

@@ -586,6 +586,7 @@ function CronJobRow({
           isPaused={isPaused}
           onDelete={onDelete}
           onEdit={onEdit}
+          onHistory={onHistory}
           onPauseResume={onPauseResume}
           onTrigger={onTrigger}
           title={jobTitle(job)}
