@@ -1,7 +1,8 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 
+import { useTranslation } from '@/hooks/use-translation'
 import { Button } from '@/components/ui/button'
-import { ErrorState } from '@/components/ui/error-state'
+import { AlertTriangle, RefreshCw } from '@/lib/icons'
 
 export interface ErrorBoundaryFallbackProps {
   error: Error
@@ -52,23 +53,41 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 }
 
 function RootErrorFallback({ error, reset }: ErrorBoundaryFallbackProps) {
+  const { t } = useTranslation()
   return (
-    <div className="fixed inset-0 z-[1500] grid place-items-center bg-(--ui-chat-surface-background) p-6">
-      <ErrorState
-        className="w-full max-w-[28rem]"
-        description={error.message || 'The view hit an unexpected error. Your chats and settings are safe.'}
-        title="Something broke in the interface"
-      >
-        <Button className="font-semibold" onClick={reset} size="lg">
-          Try again
-        </Button>
-        <Button onClick={() => window.location.reload()} variant="text">
-          Reload window
-        </Button>
-        <Button onClick={() => void window.hermesDesktop?.revealLogs()?.catch(() => undefined)} variant="text">
-          Open logs
-        </Button>
-      </ErrorState>
+    <div className="fixed inset-0 z-[1500] flex items-center justify-center bg-(--ui-chat-surface-background) p-6">
+      <div className="w-full max-w-[40rem] overflow-hidden rounded-xl border border-(--ui-stroke-secondary) bg-(--ui-chat-bubble-background) shadow-sm">
+        <div className="flex items-start gap-3 border-b border-(--ui-stroke-tertiary) px-5 py-4">
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-destructive/10 text-destructive">
+            <AlertTriangle className="size-5" />
+          </div>
+          <div>
+            <h2 className="text-[0.9375rem] font-semibold tracking-tight">{t('errors.somethingBroke')}</h2>
+            <p className="mt-1 text-[0.8125rem] leading-5 text-(--ui-text-tertiary)">
+              {t('errors.viewCrashedDesc')}
+            </p>
+          </div>
+        </div>
+
+        <div className="grid gap-4 p-5">
+          <div className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 font-mono text-[0.7rem] leading-4 text-destructive">
+            {error.message || String(error)}
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={reset}>
+              <RefreshCw className="size-4" />
+              {t('common.tryAgain')}
+            </Button>
+            <Button onClick={() => window.location.reload()} variant="outline">
+              Reload window
+            </Button>
+            <Button onClick={() => void window.hermesDesktop?.revealLogs()?.catch(() => undefined)} variant="ghost">
+              Open logs
+            </Button>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }

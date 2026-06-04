@@ -4,8 +4,9 @@ import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { getAuxiliaryModels, getGlobalModelInfo, getGlobalModelOptions, setModelAssignment } from '@/hermes'
 import type { AuxiliaryModelsResponse, ModelOptionProvider } from '@/hermes'
-import { Cpu, Loader2 } from '@/lib/icons'
+import { Cpu, Loader2, Sparkles } from '@/lib/icons'
 import { cn } from '@/lib/utils'
+import { useTranslation } from '@/hooks/use-translation'
 
 import { CONTROL_TEXT } from './constants'
 import { ListRow, LoadingState, Pill, SectionHeading } from './primitives'
@@ -23,6 +24,7 @@ const AUX_TASKS: readonly AuxTaskMeta[] = [
   { key: 'vision', label: 'Vision', hint: 'Image analysis' },
   { key: 'web_extract', label: 'Web extract', hint: 'Page summarization' },
   { key: 'compression', label: 'Compression', hint: 'Context compaction' },
+  { key: 'session_search', label: 'Session search', hint: 'Recall queries' },
   { key: 'skills_hub', label: 'Skills hub', hint: 'Skill search' },
   { key: 'approval', label: 'Approval', hint: 'Smart auto-approve' },
   { key: 'mcp', label: 'MCP', hint: 'MCP tool routing' },
@@ -38,6 +40,7 @@ interface ModelSettingsProps {
 }
 
 export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
+  const { t } = useTranslation()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [mainModel, setMainModel] = useState<{ model: string; provider: string } | null>(null)
@@ -191,19 +194,24 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
   }, [mainModel, refresh])
 
   if (loading && !mainModel) {
-    return <LoadingState label="Loading model configuration..." />
+    return <LoadingState label={t('model.loading')} />
   }
 
   return (
     <div className="grid gap-6">
       <section>
+        <SectionHeading
+          icon={Sparkles}
+          meta={mainModel ? `${mainModel.provider} / ${mainModel.model}` : undefined}
+          title={t('model.mainModel')}
+        />
         <p className="mb-3 text-xs text-muted-foreground">
-          Applies to new sessions. Use the model picker in the composer to hot-swap the active chat.
+          {t('model.mainDesc')}
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <Select onValueChange={setSelectedProvider} value={selectedProvider}>
             <SelectTrigger className={cn('min-w-40', CONTROL_TEXT)}>
-              <SelectValue placeholder="Provider" />
+              <SelectValue placeholder={t('model.providerPlaceholder')} />
             </SelectTrigger>
             <SelectContent>
               {providerOptions.map(provider => (
@@ -215,7 +223,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
           </Select>
           <Select onValueChange={setSelectedModel} value={selectedModel}>
             <SelectTrigger className={cn('min-w-60', CONTROL_TEXT)}>
-              <SelectValue placeholder="Model" />
+              <SelectValue placeholder={t('model.modelPlaceholder')} />
             </SelectTrigger>
             <SelectContent>
               {(selectedProviderModels.length ? selectedProviderModels : []).map(model => (
@@ -225,13 +233,9 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
               ))}
             </SelectContent>
           </Select>
-          <Button
-            disabled={!selectedProvider || !selectedModel || applying}
-            onClick={() => void applyMainModel()}
-            size="sm"
-          >
-            {applying && <Loader2 className="size-3.5 animate-spin" />}
-            {applying ? 'Applying...' : 'Apply'}
+          <Button disabled={!selectedProvider || !selectedModel || applying} onClick={() => void applyMainModel()} size="sm">
+            {applying ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
+            {applying ? t('model.applying') : t('model.apply')}
           </Button>
         </div>
         {error && <div className="mt-2 text-xs text-destructive">{error}</div>}
@@ -239,20 +243,20 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
 
       <section>
         <div className="mb-2.5 flex items-center justify-between">
-          <SectionHeading icon={Cpu} title="Auxiliary models" />
+          <SectionHeading icon={Cpu} title={t('model.auxiliaryModels')} />
           <Button
             disabled={!mainModel || applying}
             onClick={() => void resetAuxiliaryModels()}
             size="sm"
-            variant="textStrong"
+            variant="outline"
           >
-            Reset all to main
+            {t('model.resetAllToMain')}
           </Button>
         </div>
         <p className="mb-2 text-xs text-muted-foreground">
-          Helper tasks run on the main model by default. Assign a dedicated model to any task to override.
+          {t('model.auxiliaryDesc')}
         </p>
-        <div className="grid gap-1">
+        <div className="divide-y divide-border/40">
           {AUX_TASKS.map(meta => {
             const current = auxiliary?.tasks.find(entry => entry.task === meta.key)
             const isAuto = !current || !current.provider || current.provider === 'auto'
@@ -267,30 +271,30 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                         disabled={!mainModel || applying}
                         onClick={() => void setAuxiliaryToMain(meta.key)}
                         size="sm"
-                        variant="text"
+                        variant="ghost"
                       >
-                        Set to main
+                        {t('model.setToMain')}
                       </Button>
                       <Button
                         disabled={!providers.length || applying}
                         onClick={() => beginAuxiliaryEdit(meta.key)}
                         size="sm"
-                        variant="textStrong"
+                        variant="outline"
                       >
-                        Change
+                        {t('model.change')}
                       </Button>
                     </div>
                   )
                 }
                 below={
                   isEditing && (
-                    <div className="mt-2 flex flex-wrap items-center gap-2 pt-1">
+                    <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-border/40 pt-2">
                       <Select
                         onValueChange={value => setAuxDraft(prev => ({ ...prev, provider: value, model: '' }))}
                         value={auxDraft.provider}
                       >
                         <SelectTrigger className={cn('min-w-32', CONTROL_TEXT)}>
-                          <SelectValue placeholder="Provider" />
+                          <SelectValue placeholder={t('model.providerPlaceholder')} />
                         </SelectTrigger>
                         <SelectContent>
                           {providerOptions.map(provider => (
@@ -305,7 +309,7 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                         value={auxDraft.model}
                       >
                         <SelectTrigger className={cn('min-w-48', CONTROL_TEXT)}>
-                          <SelectValue placeholder="Model" />
+                          <SelectValue placeholder={t('model.modelPlaceholder')} />
                         </SelectTrigger>
                         <SelectContent>
                           {(auxDraftProviderModels.length ? auxDraftProviderModels : []).map(model => (
@@ -320,26 +324,24 @@ export function ModelSettings({ onMainModelChanged }: ModelSettingsProps) {
                         onClick={() => void applyAuxiliaryDraft(meta.key)}
                         size="sm"
                       >
-                        {applying ? 'Applying...' : 'Apply'}
+                        {applying ? t('model.applying') : t('model.apply')}
                       </Button>
                       <Button onClick={() => setEditingAuxTask(null)} size="sm" variant="ghost">
-                        Cancel
+                        {t('model.cancel')}
                       </Button>
                     </div>
                   )
                 }
                 description={
                   <span className="font-mono text-[0.68rem]">
-                    {isAuto
-                      ? 'auto · use main model'
-                      : `${current.provider} · ${current.model || '(provider default)'}`}
+                    {isAuto ? t('model.autoUseMain') : `${current.provider} · ${current.model || t('model.providerDefault')}`}
                   </span>
                 }
                 key={meta.key}
                 title={
                   <span className="flex items-baseline gap-2">
-                    {meta.label}
-                    <Pill>{meta.hint}</Pill>
+                    {t(`model.auxTask.${meta.key}` as any)}
+                    <Pill>{t(`model.auxTask.${meta.key}Hint` as any)}</Pill>
                   </span>
                 }
               />

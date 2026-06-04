@@ -9,6 +9,8 @@ import type { DesktopUpdateCommit, DesktopUpdateStage, DesktopUpdateStatus } fro
 import { buildCommitChangelog, type CommitGroup } from '@/lib/commit-changelog'
 import { AlertCircle, Check, CheckCircle2, Copy, Loader2, Sparkles, Terminal } from '@/lib/icons'
 import { cn } from '@/lib/utils'
+import { t } from '@/store/i18n'
+import { useLocaleSync } from '@/store/use-locale-sync'
 import {
   $updateApply,
   $updateChecking,
@@ -37,6 +39,8 @@ function totalItems(groups: readonly CommitGroup[]) {
 }
 
 export function UpdatesOverlay() {
+  useLocaleSync()
+
   const open = useStore($updateOverlayOpen)
   const status = useStore($updateStatus)
   const checking = useStore($updateChecking)
@@ -190,7 +194,7 @@ function IdleView({
           <Sparkles className="size-7" />
         </span>
 
-        <DialogTitle className="text-center text-xl">New update available</DialogTitle>
+        <DialogTitle className="text-center text-xl">{t('updates.newUpdateAvailable')}</DialogTitle>
         <DialogDescription className="text-center text-sm">
           A new version of Hermes is ready to install.
         </DialogDescription>
@@ -251,7 +255,7 @@ function ManualView({ command, onDone }: { command: string; onDone: () => void }
           <Terminal className="size-7" />
         </span>
 
-        <DialogTitle className="text-center text-xl">Update from your terminal</DialogTitle>
+        <DialogTitle className="text-center text-xl">{t('updates.updateFromTerminal')}</DialogTitle>
         <DialogDescription className="text-center text-sm">
           You installed Hermes from the command line, so updates run there too. Paste this into your terminal:
         </DialogDescription>
@@ -323,7 +327,7 @@ function ApplyingView({ apply }: { apply: UpdateApplyState }) {
         />
       </div>
 
-      <p className="text-center text-xs text-muted-foreground">Hermes will close to apply the update.</p>
+      <p className="text-center text-xs text-muted-foreground">{t('updates.closeToApply')}</p>
     </div>
   )
 }

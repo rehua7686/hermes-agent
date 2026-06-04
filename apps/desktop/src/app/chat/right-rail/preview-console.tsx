@@ -6,7 +6,9 @@ import { requestComposerInsert } from '@/app/chat/composer/focus'
 import { CopyButton } from '@/components/ui/copy-button'
 import { PanelBottom, Send, Trash2 } from '@/lib/icons'
 import { cn } from '@/lib/utils'
+import { t } from '@/store/i18n'
 import { notify } from '@/store/notifications'
+import { useLocaleSync } from '@/store/use-locale-sync'
 
 import type { ConsoleEntry, PreviewConsoleState } from './preview-console-state'
 
@@ -149,6 +151,8 @@ export function PreviewConsolePanel({
   consoleState,
   startConsoleResize
 }: PreviewConsolePanelProps) {
+  useLocaleSync()
+
   const consoleHeight = useStore(consoleState.$height)
   const logs = useStore(consoleState.$logs)
   const selectedLogIds = useStore(consoleState.$selectedLogIds)
@@ -202,7 +206,7 @@ export function PreviewConsolePanel({
       style={{ '--preview-console-height': `${consoleHeight}px` } as CSSProperties}
     >
       <div
-        aria-label="Resize preview console"
+        aria-label={t('previewConsole.resizeLabel')}
         className="group absolute inset-x-0 -top-1 z-1 h-2 cursor-row-resize"
         onDoubleClick={() => consoleState.setHeight(CONSOLE_HEADER_HEIGHT)}
         onPointerDown={startConsoleResize}
@@ -278,7 +282,7 @@ export function PreviewConsolePanel({
             )
           })
         ) : (
-          <div className="py-2 text-muted-foreground/70">No console messages yet.</div>
+          <div className="py-2 text-muted-foreground/70">{t('previewConsole.noMessages')}</div>
         )}
       </div>
     </div>

@@ -15,202 +15,34 @@ import type { ThemeMode } from '@/themes/context'
 
 import type { DesktopConfigSection } from './types'
 
-// Provider group definitions used to fold raw env-var names like
-// ``XAI_API_KEY`` into a single "xAI" card with a friendly label, short
-// description, and signup URL. Membership is determined by longest
-// prefix match (see ``providerGroup`` in helpers.ts) so more specific
-// prefixes (``MINIMAX_CN_``) correctly beat their general parents
-// (``MINIMAX_``). New providers should be added here so they get their
-// own card in Settings → Keys instead of being lumped into "Other".
 interface ProviderPrefix {
   prefix: string
   name: string
-  /** Optional one-line tagline shown beneath the group name. */
-  description?: string
-  /** Optional canonical signup/console URL surfaced from the card header. */
-  docsUrl?: string
-  /** Lower numbers float to the top of the providers list. */
   priority: number
 }
 
 export const EMPTY_SELECT_VALUE = '__hermes_empty__'
-export const CONTROL_TEXT = 'text-xs'
+export const CONTROL_TEXT = 'text-[0.8125rem]'
 
 export const PROVIDER_GROUPS: ProviderPrefix[] = [
-  {
-    prefix: 'NOUS_',
-    name: 'Nous Portal',
-    description: 'Hosted Hermes & Nous-trained models',
-    docsUrl: 'https://portal.nousresearch.com',
-    priority: 0
-  },
-  {
-    prefix: 'OPENROUTER_',
-    name: 'OpenRouter',
-    description: 'Aggregator for hundreds of frontier models',
-    docsUrl: 'https://openrouter.ai/keys',
-    priority: 1
-  },
-  {
-    prefix: 'ANTHROPIC_',
-    name: 'Anthropic',
-    description: 'Claude API access (Sonnet, Opus, Haiku)',
-    docsUrl: 'https://console.anthropic.com/settings/keys',
-    priority: 2
-  },
-  {
-    prefix: 'XAI_',
-    name: 'xAI',
-    description: 'Grok models (use OAuth for SuperGrok / Premium+)',
-    docsUrl: 'https://console.x.ai/',
-    priority: 3
-  },
-  {
-    prefix: 'GOOGLE_',
-    name: 'Gemini',
-    description: 'Google AI Studio (Gemini 1.5 / 2.0 / 2.5)',
-    docsUrl: 'https://aistudio.google.com/app/apikey',
-    priority: 4
-  },
+  { prefix: 'NOUS_', name: 'Nous Portal', priority: 0 },
+  { prefix: 'ANTHROPIC_', name: 'Anthropic', priority: 1 },
+  { prefix: 'DASHSCOPE_', name: 'DashScope (Qwen)', priority: 2 },
+  { prefix: 'HERMES_QWEN_', name: 'DashScope (Qwen)', priority: 2 },
+  { prefix: 'DEEPSEEK_', name: 'DeepSeek', priority: 3 },
+  { prefix: 'GOOGLE_', name: 'Gemini', priority: 4 },
   { prefix: 'GEMINI_', name: 'Gemini', priority: 4 },
-  { prefix: 'HERMES_GEMINI_', name: 'Gemini', priority: 4 },
-  {
-    prefix: 'DEEPSEEK_',
-    name: 'DeepSeek',
-    description: 'Direct DeepSeek API (V3.x, R1)',
-    docsUrl: 'https://platform.deepseek.com/api_keys',
-    priority: 5
-  },
-  {
-    prefix: 'DASHSCOPE_',
-    name: 'DashScope (Qwen)',
-    description: 'Alibaba Cloud DashScope — Qwen and multi-vendor models',
-    docsUrl: 'https://modelstudio.console.alibabacloud.com/',
-    priority: 6
-  },
-  { prefix: 'HERMES_QWEN_', name: 'DashScope (Qwen)', priority: 6 },
-  {
-    prefix: 'GLM_',
-    name: 'GLM / Z.AI',
-    description: 'Zhipu GLM-4.6 and Z.AI hosted endpoints',
-    docsUrl: 'https://z.ai/',
-    priority: 7
-  },
-  { prefix: 'ZAI_', name: 'GLM / Z.AI', priority: 7 },
-  { prefix: 'Z_AI_', name: 'GLM / Z.AI', priority: 7 },
-  {
-    prefix: 'KIMI_',
-    name: 'Kimi / Moonshot',
-    description: 'Moonshot Kimi K2 / coding endpoints',
-    docsUrl: 'https://platform.moonshot.cn/',
-    priority: 8
-  },
-  {
-    prefix: 'KIMI_CN_',
-    name: 'Kimi (China)',
-    description: 'Moonshot China endpoint',
-    docsUrl: 'https://platform.moonshot.cn/',
-    priority: 9
-  },
-  {
-    prefix: 'MINIMAX_',
-    name: 'MiniMax',
-    description: 'MiniMax-M2 and Hailuo international endpoints',
-    docsUrl: 'https://www.minimax.io/',
-    priority: 10
-  },
-  {
-    prefix: 'MINIMAX_CN_',
-    name: 'MiniMax (China)',
-    description: 'MiniMax mainland China endpoint',
-    docsUrl: 'https://www.minimaxi.com/',
-    priority: 11
-  },
-  {
-    prefix: 'HF_',
-    name: 'Hugging Face',
-    description: 'Inference Providers — 20+ open models via router.huggingface.co',
-    docsUrl: 'https://huggingface.co/settings/tokens',
-    priority: 12
-  },
-  {
-    prefix: 'OPENCODE_ZEN_',
-    name: 'OpenCode Zen',
-    description: 'Pay-as-you-go access to curated coding models',
-    docsUrl: 'https://opencode.ai/auth',
-    priority: 13
-  },
-  {
-    prefix: 'OPENCODE_GO_',
-    name: 'OpenCode Go',
-    description: '$10/month subscription for open coding models',
-    docsUrl: 'https://opencode.ai/auth',
-    priority: 14
-  },
-  {
-    prefix: 'NVIDIA_',
-    name: 'NVIDIA NIM',
-    description: 'build.nvidia.com or your own local NIM endpoint',
-    docsUrl: 'https://build.nvidia.com/',
-    priority: 15
-  },
-  {
-    prefix: 'OLLAMA_',
-    name: 'Ollama Cloud',
-    description: 'Cloud-hosted open models from ollama.com',
-    docsUrl: 'https://ollama.com/settings',
-    priority: 16
-  },
-  {
-    prefix: 'LM_',
-    name: 'LM Studio',
-    description: 'Local LM Studio server (OpenAI-compatible)',
-    docsUrl: 'https://lmstudio.ai/docs/local-server',
-    priority: 17
-  },
-  {
-    prefix: 'STEPFUN_',
-    name: 'StepFun',
-    description: 'StepFun Step Plan coding models',
-    docsUrl: 'https://platform.stepfun.com/',
-    priority: 18
-  },
-  {
-    prefix: 'XIAOMI_',
-    name: 'Xiaomi MiMo',
-    description: 'MiMo-V2.5 and Xiaomi proprietary models',
-    docsUrl: 'https://platform.xiaomimimo.com',
-    priority: 19
-  },
-  {
-    prefix: 'ARCEEAI_',
-    name: 'Arcee AI',
-    description: 'Arcee-hosted small + medium models',
-    docsUrl: 'https://chat.arcee.ai/',
-    priority: 20
-  },
-  { prefix: 'ARCEE_', name: 'Arcee AI', priority: 20 },
-  {
-    prefix: 'GMI_',
-    name: 'GMI Cloud',
-    description: 'GMI Cloud GPU + model serving',
-    docsUrl: 'https://www.gmicloud.ai/',
-    priority: 21
-  },
-  {
-    prefix: 'AZURE_FOUNDRY_',
-    name: 'Azure Foundry',
-    description: 'Azure AI Foundry custom endpoints (OpenAI / Anthropic-compatible)',
-    docsUrl: 'https://ai.azure.com/',
-    priority: 22
-  },
-  {
-    prefix: 'AWS_',
-    name: 'AWS Bedrock',
-    description: 'Authenticate via AWS profile + region',
-    docsUrl: 'https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-regions.html',
-    priority: 23
-  }
+  { prefix: 'GLM_', name: 'GLM / Z.AI', priority: 5 },
+  { prefix: 'ZAI_', name: 'GLM / Z.AI', priority: 5 },
+  { prefix: 'Z_AI_', name: 'GLM / Z.AI', priority: 5 },
+  { prefix: 'HF_', name: 'Hugging Face', priority: 6 },
+  { prefix: 'KIMI_', name: 'Kimi / Moonshot', priority: 7 },
+  { prefix: 'MINIMAX_', name: 'MiniMax', priority: 8 },
+  { prefix: 'MINIMAX_CN_', name: 'MiniMax (China)', priority: 9 },
+  { prefix: 'OPENCODE_GO_', name: 'OpenCode Go', priority: 10 },
+  { prefix: 'OPENCODE_ZEN_', name: 'OpenCode Zen', priority: 11 },
+  { prefix: 'OPENROUTER_', name: 'OpenRouter', priority: 12 },
+  { prefix: 'XIAOMI_', name: 'Xiaomi MiMo', priority: 13 }
 ]
 
 export const BUILTIN_PERSONALITIES = [
@@ -245,98 +77,98 @@ export const ENUM_OPTIONS: Record<string, string[]> = {
 }
 
 export const FIELD_LABELS: Record<string, string> = {
-  model: 'Default Model',
-  model_context_length: 'Context Window',
-  fallback_providers: 'Fallback Models',
-  toolsets: 'Enabled Toolsets',
-  timezone: 'Timezone',
-  'display.personality': 'Personality',
-  'display.show_reasoning': 'Reasoning Blocks',
-  'agent.max_turns': 'Max Agent Steps',
-  'agent.image_input_mode': 'Image Attachments',
-  'terminal.cwd': 'Working Directory',
-  'terminal.backend': 'Execution Backend',
-  'terminal.timeout': 'Command Timeout',
-  'terminal.persistent_shell': 'Persistent Shell',
-  'terminal.env_passthrough': 'Environment Passthrough',
-  file_read_max_chars: 'File Read Limit',
-  'tool_output.max_bytes': 'Terminal Output Limit',
-  'tool_output.max_lines': 'File Page Limit',
-  'tool_output.max_line_length': 'Line Length Limit',
-  'code_execution.mode': 'Code Execution Mode',
-  'approvals.mode': 'Approval Mode',
-  'approvals.timeout': 'Approval Timeout',
-  'approvals.mcp_reload_confirm': 'Confirm MCP Reloads',
-  command_allowlist: 'Command Allowlist',
-  'security.redact_secrets': 'Redact Secrets',
-  'security.allow_private_urls': 'Allow Private URLs',
-  'browser.allow_private_urls': 'Browser Private URLs',
-  'browser.auto_local_for_private_urls': 'Local Browser For Private URLs',
-  'checkpoints.enabled': 'File Checkpoints',
-  'checkpoints.max_snapshots': 'Checkpoint Limit',
-  'voice.record_key': 'Voice Shortcut',
-  'voice.max_recording_seconds': 'Max Recording Length',
-  'voice.auto_tts': 'Read Responses Aloud',
-  'stt.enabled': 'Speech To Text',
-  'stt.provider': 'Speech-To-Text Provider',
-  'stt.local.model': 'Local Transcription Model',
-  'stt.local.language': 'Transcription Language',
-  'stt.elevenlabs.model_id': 'ElevenLabs STT Model',
-  'stt.elevenlabs.language_code': 'ElevenLabs Language',
-  'stt.elevenlabs.tag_audio_events': 'Tag Audio Events',
-  'stt.elevenlabs.diarize': 'Speaker Diarization',
-  'tts.provider': 'Text-To-Speech Provider',
-  'tts.edge.voice': 'Edge Voice',
-  'tts.openai.model': 'OpenAI TTS Model',
-  'tts.openai.voice': 'OpenAI Voice',
-  'tts.elevenlabs.voice_id': 'ElevenLabs Voice',
-  'tts.elevenlabs.model_id': 'ElevenLabs Model',
-  'memory.memory_enabled': 'Persistent Memory',
-  'memory.user_profile_enabled': 'User Profile',
-  'memory.memory_char_limit': 'Memory Budget',
-  'memory.user_char_limit': 'Profile Budget',
-  'memory.provider': 'Memory Provider',
-  'context.engine': 'Context Engine',
-  'compression.enabled': 'Auto-Compression',
-  'compression.threshold': 'Compression Threshold',
-  'compression.target_ratio': 'Compression Target',
-  'compression.protect_last_n': 'Protected Recent Messages',
-  'agent.api_max_retries': 'API Retries',
-  'agent.service_tier': 'Service Tier',
-  'agent.tool_use_enforcement': 'Tool-Use Enforcement',
-  'delegation.model': 'Subagent Model',
-  'delegation.provider': 'Subagent Provider',
-  'delegation.max_iterations': 'Subagent Turn Limit',
-  'delegation.max_concurrent_children': 'Parallel Subagents',
-  'delegation.child_timeout_seconds': 'Subagent Timeout',
-  'delegation.reasoning_effort': 'Subagent Reasoning Effort'
+  model: 'config.label.defaultModel',
+  model_context_length: 'config.label.contextWindow',
+  fallback_providers: 'config.label.fallbackModels',
+  toolsets: 'config.label.enabledToolsets',
+  timezone: 'config.label.timezone',
+  'display.personality': 'config.label.personality',
+  'display.show_reasoning': 'config.label.reasoningBlocks',
+  'agent.max_turns': 'config.label.maxAgentSteps',
+  'agent.image_input_mode': 'config.label.imageAttachments',
+  'terminal.cwd': 'config.label.workingDirectory',
+  'terminal.backend': 'config.label.executionBackend',
+  'terminal.timeout': 'config.label.commandTimeout',
+  'terminal.persistent_shell': 'config.label.persistentShell',
+  'terminal.env_passthrough': 'config.label.envPassthrough',
+  file_read_max_chars: 'config.label.fileReadLimit',
+  'tool_output.max_bytes': 'config.label.terminalOutputLimit',
+  'tool_output.max_lines': 'config.label.filePageLimit',
+  'tool_output.max_line_length': 'config.label.lineLengthLimit',
+  'code_execution.mode': 'config.label.codeExecutionMode',
+  'approvals.mode': 'config.label.approvalMode',
+  'approvals.timeout': 'config.label.approvalTimeout',
+  'approvals.mcp_reload_confirm': 'config.label.confirmMcpReloads',
+  command_allowlist: 'config.label.commandAllowlist',
+  'security.redact_secrets': 'config.label.redactSecrets',
+  'security.allow_private_urls': 'config.label.allowPrivateUrls',
+  'browser.allow_private_urls': 'config.label.browserPrivateUrls',
+  'browser.auto_local_for_private_urls': 'config.label.localBrowserForPrivateUrls',
+  'checkpoints.enabled': 'config.label.fileCheckpoints',
+  'checkpoints.max_snapshots': 'config.label.checkpointLimit',
+  'voice.record_key': 'config.label.voiceShortcut',
+  'voice.max_recording_seconds': 'config.label.maxRecordingLength',
+  'voice.auto_tts': 'config.label.readResponsesAloud',
+  'stt.enabled': 'config.label.speechToText',
+  'stt.provider': 'config.label.speechToTextProvider',
+  'stt.local.model': 'config.label.localTranscriptionModel',
+  'stt.local.language': 'config.label.transcriptionLanguage',
+  'stt.elevenlabs.model_id': 'config.label.elevenlabsSttModel',
+  'stt.elevenlabs.language_code': 'config.label.elevenlabsLanguage',
+  'stt.elevenlabs.tag_audio_events': 'config.label.tagAudioEvents',
+  'stt.elevenlabs.diarize': 'config.label.speakerDiarization',
+  'tts.provider': 'config.label.textToSpeechProvider',
+  'tts.edge.voice': 'config.label.edgeVoice',
+  'tts.openai.model': 'config.label.openaiTtsModel',
+  'tts.openai.voice': 'config.label.openaiVoice',
+  'tts.elevenlabs.voice_id': 'config.label.elevenlabsVoice',
+  'tts.elevenlabs.model_id': 'config.label.elevenlabsModel',
+  'memory.memory_enabled': 'config.label.persistentMemory',
+  'memory.user_profile_enabled': 'config.label.userProfile',
+  'memory.memory_char_limit': 'config.label.memoryBudget',
+  'memory.user_char_limit': 'config.label.profileBudget',
+  'memory.provider': 'config.label.memoryProvider',
+  'context.engine': 'config.label.contextEngine',
+  'compression.enabled': 'config.label.autoCompression',
+  'compression.threshold': 'config.label.compressionThreshold',
+  'compression.target_ratio': 'config.label.compressionTarget',
+  'compression.protect_last_n': 'config.label.protectedRecentMessages',
+  'agent.api_max_retries': 'config.label.apiRetries',
+  'agent.service_tier': 'config.label.serviceTier',
+  'agent.tool_use_enforcement': 'config.label.toolUseEnforcement',
+  'delegation.model': 'config.label.subagentModel',
+  'delegation.provider': 'config.label.subagentProvider',
+  'delegation.max_iterations': 'config.label.subagentTurnLimit',
+  'delegation.max_concurrent_children': 'config.label.parallelSubagents',
+  'delegation.child_timeout_seconds': 'config.label.subagentTimeout',
+  'delegation.reasoning_effort': 'config.label.subagentReasoningEffort'
 }
 
 export const FIELD_DESCRIPTIONS: Record<string, string> = {
-  model: 'Used for new chats unless you pick a different model in the composer.',
-  model_context_length: "Leave at 0 to use the selected model's detected context window.",
-  fallback_providers: 'Backup provider:model entries to try if the default model fails.',
-  'display.personality': 'Default assistant style for new sessions.',
-  timezone: 'Used when Hermes needs local time context. Blank uses the system timezone.',
-  'display.show_reasoning': 'Show reasoning sections when the backend provides them.',
-  'agent.image_input_mode': 'Controls how image attachments are sent to the model.',
-  'terminal.cwd': 'Default project folder for tool and terminal work.',
-  'code_execution.mode': 'How strictly code execution is scoped to the current project.',
-  'terminal.persistent_shell': 'Keep shell state between commands when the backend supports it.',
-  'terminal.env_passthrough': 'Environment variables to pass into tool execution.',
-  file_read_max_chars: 'Maximum characters Hermes can read from one file request.',
-  'approvals.mode': 'How Hermes handles commands that need explicit approval.',
-  'approvals.timeout': 'How long approval prompts wait before timing out.',
-  'security.redact_secrets': 'Hide detected secrets from model-visible content when possible.',
-  'checkpoints.enabled': 'Create rollback snapshots before file edits.',
-  'memory.memory_enabled': 'Save durable memories that can help future sessions.',
-  'memory.user_profile_enabled': 'Maintain a compact profile of user preferences.',
-  'context.engine': 'Strategy for managing long conversations near the context limit.',
-  'compression.enabled': 'Summarize older context when conversations get large.',
-  'voice.auto_tts': 'Automatically speak assistant responses.',
-  'stt.enabled': 'Enable local or provider-backed speech transcription.',
-  'stt.elevenlabs.language_code': 'Optional ISO-639-3 language code. Blank lets ElevenLabs auto-detect.',
-  'agent.max_turns': 'Upper bound for tool-calling turns before Hermes stops a run.'
+  model: 'config.desc.defaultModel',
+  model_context_length: 'config.desc.contextWindow',
+  fallback_providers: 'config.desc.fallbackModels',
+  'display.personality': 'config.desc.personality',
+  timezone: 'config.desc.timezone',
+  'display.show_reasoning': 'config.desc.reasoningBlocks',
+  'agent.image_input_mode': 'config.desc.imageAttachments',
+  'terminal.cwd': 'config.desc.workingDirectory',
+  'code_execution.mode': 'config.desc.codeExecutionMode',
+  'terminal.persistent_shell': 'config.desc.persistentShell',
+  'terminal.env_passthrough': 'config.desc.envPassthrough',
+  file_read_max_chars: 'config.desc.fileReadLimit',
+  'approvals.mode': 'config.desc.approvalMode',
+  'approvals.timeout': 'config.desc.approvalTimeout',
+  'security.redact_secrets': 'config.desc.redactSecrets',
+  'checkpoints.enabled': 'config.desc.fileCheckpoints',
+  'memory.memory_enabled': 'config.desc.persistentMemory',
+  'memory.user_profile_enabled': 'config.desc.userProfile',
+  'context.engine': 'config.desc.contextEngine',
+  'compression.enabled': 'config.desc.autoCompression',
+  'voice.auto_tts': 'config.desc.readResponsesAloud',
+  'stt.enabled': 'config.desc.speechToText',
+  'stt.elevenlabs.language_code': 'config.desc.elevenlabsLanguage',
+  'agent.max_turns': 'config.desc.maxAgentSteps'
 }
 
 // Curated desktop config surface: only fields a user might tune from the app.
@@ -344,24 +176,28 @@ export const SECTIONS: DesktopConfigSection[] = [
   {
     id: 'model',
     label: 'Model',
+    labelKey: 'settings.model',
     icon: Sparkles,
     keys: ['model_context_length', 'fallback_providers']
   },
   {
     id: 'chat',
     label: 'Chat',
+    labelKey: 'settings.section.chat',
     icon: MessageCircle,
     keys: ['display.personality', 'timezone', 'display.show_reasoning', 'agent.image_input_mode']
   },
   {
     id: 'appearance',
     label: 'Appearance',
+    labelKey: 'settings.appearance',
     icon: Palette,
     keys: []
   },
   {
     id: 'workspace',
     label: 'Workspace',
+    labelKey: 'settings.section.workspace',
     icon: Monitor,
     keys: [
       'terminal.cwd',
@@ -374,6 +210,7 @@ export const SECTIONS: DesktopConfigSection[] = [
   {
     id: 'safety',
     label: 'Safety',
+    labelKey: 'settings.section.safety',
     icon: Lock,
     keys: [
       'approvals.mode',
@@ -390,6 +227,7 @@ export const SECTIONS: DesktopConfigSection[] = [
   {
     id: 'memory',
     label: 'Memory & Context',
+    labelKey: 'settings.section.memory',
     icon: Brain,
     keys: [
       'memory.memory_enabled',
@@ -407,6 +245,7 @@ export const SECTIONS: DesktopConfigSection[] = [
   {
     id: 'voice',
     label: 'Voice',
+    labelKey: 'settings.section.voice',
     icon: Mic,
     keys: [
       'tts.provider',
@@ -431,6 +270,7 @@ export const SECTIONS: DesktopConfigSection[] = [
   {
     id: 'advanced',
     label: 'Advanced',
+    labelKey: 'settings.section.advanced',
     icon: Wrench,
     keys: [
       'toolsets',
@@ -457,11 +297,21 @@ export const SECTIONS: DesktopConfigSection[] = [
 export interface ModeOption {
   id: ThemeMode
   label: string
+  description: string
   icon: IconComponent
 }
 
 export const MODE_OPTIONS: ModeOption[] = [
-  { id: 'light', label: 'Light', icon: Sun },
-  { id: 'dark', label: 'Dark', icon: Moon },
-  { id: 'system', label: 'System', icon: Monitor }
+  { id: 'light', label: 'appearance.mode.light', description: 'appearance.mode.lightDesc', icon: Sun },
+  { id: 'dark', label: 'appearance.mode.dark', description: 'appearance.mode.darkDesc', icon: Moon },
+  { id: 'system', label: 'appearance.mode.system', description: 'appearance.mode.systemDesc', icon: Monitor }
 ]
+
+export const SEARCH_PLACEHOLDER: Record<'about' | 'config' | 'gateway' | 'keys' | 'mcp' | 'sessions', string> = {
+  about: 'About Hermes Desktop',
+  config: 'Search settings...',
+  gateway: 'Gateway connection...',
+  keys: 'Search API keys...',
+  mcp: 'Search MCP servers...',
+  sessions: 'Search archived sessions...'
+}
