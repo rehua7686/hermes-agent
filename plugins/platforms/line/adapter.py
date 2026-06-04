@@ -93,6 +93,9 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
     cache_image_from_bytes,
+    cache_audio_from_bytes,
+    cache_video_from_bytes,
+    cache_document_from_bytes,
 )
 from gateway.config import Platform
 
@@ -487,7 +490,7 @@ class _LineClient:
         except Exception as exc:  # best-effort; never raise
             logger.debug("LINE loading indicator failed: %s", exc)
 
-    async def fetch_content(self, message_id: str) -> bytes:
+    async def fetch_content(self, message_id: str) -> Tuple[bytes, str]:
         """Download an inbound media message's binary content."""
         import aiohttp
         url = LINE_CONTENT_URL_FMT.format(message_id=message_id)
@@ -496,7 +499,8 @@ class _LineClient:
             async with session.get(url, headers={"Authorization": f"Bearer {self._token}"}) as resp:
                 if resp.status >= 400:
                     raise RuntimeError(f"LINE content {resp.status}")
-                return await resp.read()
+                content_type = resp.headers.get("Content-Type", "")
+                return await resp.read(), content_type
 
     async def get_bot_user_id(self) -> Optional[str]:
         """Fetch this channel's own userId so we can filter self-messages."""
@@ -942,7 +946,8 @@ class LineAdapter(BasePlatformAdapter):
             local_path = await self._download_media(message_id, msg_type)
             if local_path:
                 media_urls.append(local_path)
-                media_types.append(msg_type)
+                mime, _ = mimetypes.guess_type(local_path)
+                media_types.append(mime or "application/octet-stream")
             text = f"[{msg_type}]"
         elif msg_type == "sticker":
             keywords = msg.get("keywords") or []
@@ -966,9 +971,21 @@ class LineAdapter(BasePlatformAdapter):
             chat_name=chat_id,
         )
 
+        # Map LINE message types to standard gateway MessageType values.
+        type_mapping = {
+            "text": MessageType.TEXT,
+            "image": MessageType.PHOTO,
+            "audio": MessageType.AUDIO,
+            "video": MessageType.VIDEO,
+            "file": MessageType.DOCUMENT,
+            "sticker": MessageType.STICKER,
+            "location": MessageType.LOCATION,
+        }
+        message_type = type_mapping.get(msg_type, MessageType.TEXT)
+
         event_obj = MessageEvent(
             text=text,
-            message_type=MessageType.TEXT if msg_type == "text" else MessageType.IMAGE,
+            message_type=message_type,
             source=source_obj,
             raw_message=event,
             message_id=message_id,
@@ -1041,18 +1058,38 @@ class LineAdapter(BasePlatformAdapter):
         if not self._client or not message_id:
             return None
         try:
-            data = await self._client.fetch_content(message_id)
+            data, content_type = await self._client.fetch_content(message_id)
         except Exception as exc:
             logger.warning("LINE: failed to fetch %s content for %s: %s", msg_type, message_id, exc)
             return None
-        ext = {
-            "image": ".jpg",
-            "audio": ".m4a",
-            "video": ".mp4",
-            "file": ".bin",
-        }.get(msg_type, ".bin")
+
+        # Guess extension from Content-Type if possible, otherwise fallback.
+        ext = None
+        if content_type:
+            clean_ct = content_type.split(";")[0].strip()
+            ext = mimetypes.guess_extension(clean_ct)
+
+        if not ext:
+            ext = {
+                "image": ".jpg",
+                "audio": ".m4a",
+                "video": ".mp4",
+                "file": ".bin",
+            }.get(msg_type, ".bin")
+
         try:
-            return cache_image_from_bytes(data, ext=ext)
+            if msg_type == "image":
+                return cache_image_from_bytes(data, ext=ext)
+            elif msg_type == "audio":
+                return cache_audio_from_bytes(data, ext=ext)
+            elif msg_type == "video":
+                return cache_video_from_bytes(data, ext=ext)
+            elif msg_type == "file":
+                filename = f"file_{message_id}{ext}"
+                return cache_document_from_bytes(data, filename)
+            else:
+                filename = f"file_{message_id}{ext}"
+                return cache_document_from_bytes(data, filename)
         except Exception as exc:
             logger.warning("LINE: failed to cache %s payload: %s", msg_type, exc)
             return None

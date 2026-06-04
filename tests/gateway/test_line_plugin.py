@@ -641,3 +641,130 @@ class TestAdapterInit:
         assert asyncio.run(ad.get_chat_info("U123"))["type"] == "dm"
         assert asyncio.run(ad.get_chat_info("C123"))["type"] == "group"
         assert asyncio.run(ad.get_chat_info("R123"))["type"] == "channel"
+
+
+class TestInboundMediaParsing:
+
+    def _adapter(self):
+        from gateway.config import PlatformConfig
+        cfg = PlatformConfig(
+            enabled=True,
+            extra={
+                "channel_access_token": "tok",
+                "channel_secret": "sec",
+            },
+        )
+        ad = LineAdapter(cfg)
+        ad.handle_message = AsyncMock()
+        return ad
+
+    def test_inbound_image_maps_to_photo(self):
+        from gateway.platforms.base import MessageType
+        ad = self._adapter()
+        ad._download_media = AsyncMock(return_value="/tmp/test_image.jpg")
+
+        event = {
+            "type": "message",
+            "replyToken": "rt",
+            "source": {"type": "user", "userId": "U1"},
+            "message": {"id": "m1", "type": "image"},
+        }
+        asyncio.run(ad._handle_message_event(event))
+        ad.handle_message.assert_awaited_once()
+        event_obj = ad.handle_message.call_args[0][0]
+        assert event_obj.message_type == MessageType.PHOTO
+        assert event_obj.text == "[image]"
+        assert event_obj.media_urls == ["/tmp/test_image.jpg"]
+        assert event_obj.media_types == ["image/jpeg"]
+
+    def test_inbound_sticker_maps_to_sticker(self):
+        from gateway.platforms.base import MessageType
+        ad = self._adapter()
+
+        event = {
+            "type": "message",
+            "replyToken": "rt",
+            "source": {"type": "user", "userId": "U1"},
+            "message": {
+                "id": "m1",
+                "type": "sticker",
+                "keywords": ["smile", "happy"],
+            },
+        }
+        asyncio.run(ad._handle_message_event(event))
+        ad.handle_message.assert_awaited_once()
+        event_obj = ad.handle_message.call_args[0][0]
+        assert event_obj.message_type == MessageType.STICKER
+        assert event_obj.text == "[sticker: smile, happy]"
+
+    def test_inbound_location_maps_to_location(self):
+        from gateway.platforms.base import MessageType
+        ad = self._adapter()
+
+        event = {
+            "type": "message",
+            "replyToken": "rt",
+            "source": {"type": "user", "userId": "U1"},
+            "message": {
+                "id": "m1",
+                "type": "location",
+                "title": "My Store",
+                "address": "123 Main St",
+            },
+        }
+        asyncio.run(ad._handle_message_event(event))
+        ad.handle_message.assert_awaited_once()
+        event_obj = ad.handle_message.call_args[0][0]
+        assert event_obj.message_type == MessageType.LOCATION
+        assert event_obj.text == "[location: My Store 123 Main St]"
+
+    def test_download_media_image(self):
+        ad = self._adapter()
+        ad._client = AsyncMock()
+        gif_bytes = b"GIF89a\x01\x00"
+        ad._client.fetch_content.return_value = (gif_bytes, "image/gif")
+
+        with patch.object(_line, "cache_image_from_bytes", return_value="/tmp/fake.gif") as mock_cache:
+            path = asyncio.run(ad._download_media("m1", "image"))
+            assert path == "/tmp/fake.gif"
+            mock_cache.assert_called_once_with(gif_bytes, ext=".gif")
+
+    def test_download_media_audio(self):
+        ad = self._adapter()
+        ad._client = AsyncMock()
+        ad._client.fetch_content.return_value = (b"fake audio data", "audio/mpeg")
+
+        with patch.object(_line, "cache_audio_from_bytes", return_value="/tmp/fake.mp3") as mock_cache:
+            path = asyncio.run(ad._download_media("m2", "audio"))
+            assert path == "/tmp/fake.mp3"
+            mock_cache.assert_called_once_with(b"fake audio data", ext=".mp3")
+
+    def test_download_media_video(self):
+        ad = self._adapter()
+        ad._client = AsyncMock()
+        ad._client.fetch_content.return_value = (b"fake video data", "video/mp4")
+
+        with patch.object(_line, "cache_video_from_bytes", return_value="/tmp/fake.mp4") as mock_cache:
+            path = asyncio.run(ad._download_media("m3", "video"))
+            assert path == "/tmp/fake.mp4"
+            mock_cache.assert_called_once_with(b"fake video data", ext=".mp4")
+
+    def test_download_media_file_with_mime(self):
+        ad = self._adapter()
+        ad._client = AsyncMock()
+        ad._client.fetch_content.return_value = (b"fake doc pdf data", "application/pdf")
+
+        with patch.object(_line, "cache_document_from_bytes", return_value="/tmp/fake.pdf") as mock_cache:
+            path = asyncio.run(ad._download_media("m4", "file"))
+            assert path == "/tmp/fake.pdf"
+            mock_cache.assert_called_once_with(b"fake doc pdf data", "file_m4.pdf")
+
+    def test_download_media_file_fallback(self):
+        ad = self._adapter()
+        ad._client = AsyncMock()
+        ad._client.fetch_content.return_value = (b"fake bin data", "")
+
+        with patch.object(_line, "cache_document_from_bytes", return_value="/tmp/fake.bin") as mock_cache:
+            path = asyncio.run(ad._download_media("m5", "file"))
+            assert path == "/tmp/fake.bin"
+            mock_cache.assert_called_once_with(b"fake bin data", "file_m5.bin")
