@@ -8890,6 +8890,7 @@ class HermesCLI:
                 cmd_original=cmd_original,
             ) is None:
                 return
+            self._print_exit_summary()
             self.new_session(title=title)
         elif canonical == "resume":
             self._handle_resume_command(cmd_original)
@@ -12724,7 +12725,7 @@ class HermesCLI:
                 duration_str = f"{minutes}m {seconds}s"
             else:
                 duration_str = f"{seconds}s"
-            
+
             # Look up session title for resume-by-name hint
             session_title = None
             if self._session_db:
