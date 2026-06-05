@@ -66,6 +66,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Literal, Optional, Sequence
+from lark_oapi.core.utils.decryptor import AESCipher
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -3324,6 +3325,21 @@ class FeishuAdapter(BasePlatformAdapter):
             self._record_webhook_anomaly(remote_ip, "400")
             return web.json_response({"code": 400, "msg": "invalid json"}, status=400)
 
+        # Decrypt encrypted webhook payloads first
+        if payload.get("encrypt"):
+            if not self._encrypt_key:
+                logger.error("[Feishu] Encrypted webhook payload received but FEISHU_ENCRYPT_KEY is not set")
+                self._record_webhook_anomaly(remote_ip, "400-encrypted")
+                return web.json_response({"code": 400, "msg": "encrypted webhook payloads are not supported"}, status=400)
+            try:
+                cipher = AESCipher(self._encrypt_key)
+                decrypted = cipher.decrypt_str(payload["encrypt"])
+                payload = json.loads(decrypted)
+            except Exception as e:
+                logger.warning("[Feishu] Failed to decrypt webhook payload: %s", e)
+                self._record_webhook_anomaly(remote_ip, "400-decrypt")
+                return web.json_response({"code": 400, "msg": "failed to decrypt payload"}, status=400)
+
         # Verification token check — second layer of defence beyond signature (matches openclaw).
         if self._verification_token:
             header = payload.get("header") or {}
@@ -3337,19 +3353,15 @@ class FeishuAdapter(BasePlatformAdapter):
         # challenge requests. Validate the token (above) before reflecting the
         # challenge so an unauthenticated remote request cannot prove endpoint
         # control by getting attacker-supplied challenge data echoed back.
-        if payload.get("type") == "url_verification":
-            return web.json_response({"challenge": payload.get("challenge", "")})
+        if payload.get("type") == "url_verification" or str((payload.get("header") or {}).get("event_type") or "") == "url_verification":
+            challenge = payload.get("challenge", "") if payload.get("type") == "url_verification" else (payload.get("event") or {}).get("challenge", "")
+            return web.json_response({"challenge": challenge})
 
         # Timing-safe signature verification (only enforced when encrypt_key is set).
         if self._encrypt_key and not self._is_webhook_signature_valid(request.headers, body_bytes):
             logger.warning("[Feishu] Webhook rejected: invalid signature from %s", remote_ip)
             self._record_webhook_anomaly(remote_ip, "401-sig")
             return web.Response(status=401, text="Invalid signature")
-
-        if payload.get("encrypt"):
-            logger.error("[Feishu] Encrypted webhook payloads are not supported by Hermes webhook mode")
-            self._record_webhook_anomaly(remote_ip, "400-encrypted")
-            return web.json_response({"code": 400, "msg": "encrypted webhook payloads are not supported"}, status=400)
 
         self._clear_webhook_anomaly(remote_ip)
 
