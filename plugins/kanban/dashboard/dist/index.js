@@ -3615,7 +3615,7 @@
     return h("div", { className: "hermes-kanban-section" },
       h("div", { className: "hermes-kanban-section-head" }, tx(t, "dependencies", "Dependencies")),
       h("div", { className: "hermes-kanban-deps-row" },
-        h("span", { className: "hermes-kanban-deps-label" }, tx(t, "parents", "Parents:")),
+        h("span", { className: "hermes-kanban-deps-label" }, tx(t, "children", "Children:")),
         h("div", { className: "hermes-kanban-deps-chips" },
           (links.parents || []).length === 0
             ? h("span", { className: "hermes-kanban-deps-empty" }, tx(t, "none", "none"))
@@ -3653,7 +3653,7 @@
         }, "+ parent"),
       ),
       h("div", { className: "hermes-kanban-deps-row" },
-        h("span", { className: "hermes-kanban-deps-label" }, tx(t, "children", "Children:")),
+        h("span", { className: "hermes-kanban-deps-label" }, tx(t, "parents", "Parents:")),
         h("div", { className: "hermes-kanban-deps-chips" },
           (links.children || []).length === 0
             ? h("span", { className: "hermes-kanban-deps-empty" }, tx(t, "none", "none"))
