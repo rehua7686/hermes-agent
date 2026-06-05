@@ -5257,9 +5257,8 @@ async def get_session_messages(session_id: str, profile: Optional[str] = None):
 
 
 @app.delete("/api/sessions/{session_id}")
-async def delete_session_endpoint(session_id: str):
-    from hermes_state import SessionDB
-    db = SessionDB()
+async def delete_session_endpoint(session_id: str, profile: Optional[str] = None):
+    db = _open_session_db_for_profile(profile)
     try:
         if not db.delete_session(session_id):
             raise HTTPException(status_code=404, detail="Session not found")
