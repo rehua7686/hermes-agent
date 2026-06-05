@@ -4040,7 +4040,7 @@ class GatewayRunner:
         setsid_bin = shutil.which("setsid")
         if setsid_bin:
             subprocess.Popen(
-                [setsid_bin, "bash", "-lc", shell_cmd],
+                [setsid_bin, "--", "bash", "-lc", shell_cmd],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -15057,7 +15057,7 @@ class GatewayRunner:
                 if setsid_bin:
                     # Preferred: setsid creates a new session, fully detached
                     subprocess.Popen(
-                        [setsid_bin, "bash", "-c", update_cmd],
+                        [setsid_bin, "--", "bash", "-c", update_cmd],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                         start_new_session=True,
