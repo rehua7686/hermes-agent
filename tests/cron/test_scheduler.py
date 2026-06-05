@@ -2627,3 +2627,45 @@ class TestSendMediaTimeoutCancelsFuture:
         # 2. Second file still got dispatched — one timeout doesn't abort the batch
         adapter.send_video.assert_called_once()
         assert adapter.send_video.call_args[1]["video_path"] == str(fast.resolve())
+
+
+class TestStandaloneDeliveryTimeout:
+    """Standalone delivery must time out instead of blocking indefinitely (#38780)."""
+
+    def test_standalone_delivery_timeout_returns_error(self, monkeypatch):
+        """When _send_to_platform hangs, _deliver_result must catch the timeout
+        and return an error string instead of blocking forever."""
+        import asyncio
+
+        async def _hang_forever(*_args, **_kwargs):
+            """Coroutine that never resolves — simulates a hung platform send."""
+            await asyncio.get_event_loop().create_future()  # awaits a future that's never set
+
+        job = {
+            "id": "timeout-standalone",
+            "deliver": "origin",
+            "origin": {"platform": "telegram", "chat_id": "123"},
+        }
+
+        # Patch timeout to 0.1s so the test finishes fast
+        monkeypatch.setattr("cron.scheduler._STANDALONE_DELIVERY_TIMEOUT", 0.1)
+
+        from gateway.config import Platform
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        standalone_send = AsyncMock(side_effect=_hang_forever)
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("tools.send_message_tool._send_to_platform", new=standalone_send):
+            # No live adapter → forces standalone path
+            result = _deliver_result(
+                job, "Output.", adapters={}, loop=None,
+            )
+
+        assert result is not None, "expected an error string, got None"
+        assert "timed out" in result, f"expected 'timed out' in error, got: {result!r}"
+        assert "0.1s" in result or "60s" in result, f"expected timeout duration in error, got: {result!r}"
