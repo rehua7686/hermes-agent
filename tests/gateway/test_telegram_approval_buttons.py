@@ -26,13 +26,13 @@ def _ensure_telegram_mock():
 
     mod = MagicMock()
     mod.ext.ContextTypes.DEFAULT_TYPE = type(None)
-    mod.constants.ParseMode.MARKDOWN = "Markdown"
-    mod.constants.ParseMode.MARKDOWN_V2 = "MarkdownV2"
-    mod.constants.ParseMode.HTML = "HTML"
-    mod.constants.ChatType.PRIVATE = "private"
-    mod.constants.ChatType.GROUP = "group"
-    mod.constants.ChatType.SUPERGROUP = "supergroup"
-    mod.constants.ChatType.CHANNEL = "channel"
+    mod.ParseMode.MARKDOWN = "Markdown"
+    mod.ParseMode.MARKDOWN_V2 = "MarkdownV2"
+    mod.ParseMode.HTML = "HTML"
+    mod.ChatType.PRIVATE = "private"
+    mod.ChatType.GROUP = "group"
+    mod.ChatType.SUPERGROUP = "supergroup"
+    mod.ChatType.CHANNEL = "channel"
     # Provide real exception classes so ``except (NetworkError, ...)`` in
     # connect() doesn't blow up under xdist when this mock leaks.
     mod.error.NetworkError = type("NetworkError", (OSError,), {})
@@ -213,7 +213,7 @@ class TestTelegramExecApproval:
         )
 
         assert result.success is True
-        assert "MARKDOWN_V2" in repr(sent["parse_mode"])
+        assert sent["parse_mode"] == "MarkdownV2"
         assert "Fix \\[issue\\]\\_1" in sent["text"]
         assert "alpha\\_beta" in sent["text"]
 
@@ -355,7 +355,7 @@ class TestTelegramApprovalCallback:
                 await adapter._handle_callback_query(update, context)
 
         edit_kwargs = query.edit_message_text.call_args[1]
-        assert "MARKDOWN_V2" in repr(edit_kwargs["parse_mode"])
+        assert edit_kwargs["parse_mode"] == "MarkdownV2"
         assert "Alice\\_Bob" in edit_kwargs["text"]
         assert "Approved once" in edit_kwargs["text"]
 

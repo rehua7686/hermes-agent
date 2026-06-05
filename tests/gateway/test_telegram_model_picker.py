@@ -13,13 +13,13 @@ def _ensure_telegram_mock():
 
     mod = MagicMock()
     mod.ext.ContextTypes.DEFAULT_TYPE = type(None)
-    mod.constants.ParseMode.MARKDOWN = "Markdown"
-    mod.constants.ParseMode.MARKDOWN_V2 = "MarkdownV2"
-    mod.constants.ParseMode.HTML = "HTML"
-    mod.constants.ChatType.PRIVATE = "private"
-    mod.constants.ChatType.GROUP = "group"
-    mod.constants.ChatType.SUPERGROUP = "supergroup"
-    mod.constants.ChatType.CHANNEL = "channel"
+    mod.ParseMode.MARKDOWN = "Markdown"
+    mod.ParseMode.MARKDOWN_V2 = "MarkdownV2"
+    mod.ParseMode.HTML = "HTML"
+    mod.ChatType.PRIVATE = "private"
+    mod.ChatType.GROUP = "group"
+    mod.ChatType.SUPERGROUP = "supergroup"
+    mod.ChatType.CHANNEL = "channel"
     mod.error.NetworkError = type("NetworkError", (OSError,), {})
     mod.error.TimedOut = type("TimedOut", (OSError,), {})
     mod.error.BadRequest = type("BadRequest", (Exception,), {})
@@ -67,7 +67,7 @@ class TestTelegramModelPicker:
         )
 
         assert result.success is True
-        assert "MARKDOWN_V2" in repr(sent["parse_mode"])
+        assert sent["parse_mode"] == "MarkdownV2"
         assert "provider\\_one" in sent["text"]
         assert "`model_1`" in sent["text"]
 
@@ -98,7 +98,7 @@ class TestTelegramModelPicker:
         await adapter._handle_model_picker_callback(query, "mb", "12345")
 
         edit_kwargs = query.edit_message_text.call_args[1]
-        assert "MARKDOWN_V2" in repr(edit_kwargs["parse_mode"])
+        assert edit_kwargs["parse_mode"] == "MarkdownV2"
         assert "provider\\_one" in edit_kwargs["text"]
         assert "`model_1`" in edit_kwargs["text"]
 
@@ -139,7 +139,7 @@ class TestTelegramModelPicker:
         # regression we're guarding).
         query.edit_message_text.assert_awaited()
         edit_kwargs = query.edit_message_text.call_args[1]
-        assert "MARKDOWN_V2" in repr(edit_kwargs["parse_mode"])
+        assert edit_kwargs["parse_mode"] == "MarkdownV2"
         # The dynamic result text was routed through format_message
         # (backtick code blocks survive escaping).
         assert "`gpt-5`" in edit_kwargs["text"]

@@ -17,13 +17,13 @@ def _ensure_telegram_mock():
         return
     mod = MagicMock()
     mod.ext.ContextTypes.DEFAULT_TYPE = type(None)
-    mod.constants.ParseMode.MARKDOWN = "Markdown"
-    mod.constants.ParseMode.MARKDOWN_V2 = "MarkdownV2"
-    mod.constants.ParseMode.HTML = "HTML"
-    mod.constants.ChatType.PRIVATE = "private"
-    mod.constants.ChatType.GROUP = "group"
-    mod.constants.ChatType.SUPERGROUP = "supergroup"
-    mod.constants.ChatType.CHANNEL = "channel"
+    mod.ParseMode.MARKDOWN = "Markdown"
+    mod.ParseMode.MARKDOWN_V2 = "MarkdownV2"
+    mod.ParseMode.HTML = "HTML"
+    mod.ChatType.PRIVATE = "private"
+    mod.ChatType.GROUP = "group"
+    mod.ChatType.SUPERGROUP = "supergroup"
+    mod.ChatType.CHANNEL = "channel"
     mod.error.NetworkError = type("NetworkError", (OSError,), {})
     mod.error.TimedOut = type("TimedOut", (OSError,), {})
     mod.error.BadRequest = type("BadRequest", (Exception,), {})
@@ -71,7 +71,7 @@ class TestSendSlashConfirm:
         )
 
         assert result.success is True
-        assert "MARKDOWN_V2" in repr(sent["parse_mode"])
+        assert sent["parse_mode"] == "MarkdownV2"
         # Underscores and dots must be escaped by format_message
         assert "script\\_name" in sent["text"]
         assert "\\." in sent["text"]
