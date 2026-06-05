@@ -1,6 +1,7 @@
-"""Regression tests for #28712 — kanban dispatcher must not auto-promote
-worker-initiated ``kanban_block`` (sticky blocks), but must keep
-auto-recovering circuit-breaker blocks.
+"""Regression tests for #28712 and #32747 — kanban dispatcher must
+not auto-promote worker-initiated ``kanban_block`` or protocol-violation
+sticky blocks, but must keep auto-recovering transient circuit-breaker
+blocks (crash / timeout / spawn-failure).
 
 The bug: when a worker called ``kanban_block(reason="review-required:
 ...")`` to hand off to a human, the dispatcher's ``recompute_ready``
@@ -168,6 +169,88 @@ def test_gave_up_event_alone_does_not_make_block_sticky(kanban_home: Path) -> No
         promoted = kb.recompute_ready(conn)
         assert promoted == 1
         assert kb.get_task(conn, child).status == "ready"
+
+
+def test_protocol_violation_block_is_sticky(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test for #32747 — a task that hit a protocol
+    violation (worker exited rc=0 without calling
+    ``kanban_complete`` / ``kanban_block``) must stay blocked across
+    ``recompute_ready`` ticks.  Pre-fix, ``_has_sticky_block`` ignored
+    the ``protocol_violation`` event and the dispatcher would promote
+    the task back to ``ready``, only for the next worker spawn to do
+    the exact same thing and trip the breaker again — burning API
+    budget indefinitely (37 tasks × 270+ cycles in the field report).
+    """
+    import hermes_cli.kanban_db as _kb
+    # detect_crashed_workers' grace window would otherwise skip the
+    # liveness check on a just-claimed task.
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="quiet", assignee="worker")
+        host_prefix = _kb._claimer_id().split(":", 1)[0]
+        kb.claim_task(conn, tid, claimer=f"{host_prefix}:mock")
+        fake_pid = 999996
+        kb._set_worker_pid(conn, tid, fake_pid)
+
+        # Simulate a clean rc=0 exit by the worker subprocess.
+        _kb._record_worker_exit(fake_pid, 0)
+        original_alive = _kb._pid_alive
+        _kb._pid_alive = lambda p: False
+        try:
+            kb.detect_crashed_workers(conn)
+        finally:
+            _kb._pid_alive = original_alive
+
+        # detect_crashed_workers already auto-blocked it on the first
+        # occurrence (existing behavior).  The new contract is the
+        # *next* tick must NOT un-block it.
+        assert kb.get_task(conn, tid).status == "blocked"
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
+        assert "protocol_violation" in kinds, kinds
+
+        for _ in range(5):
+            promoted = kb.recompute_ready(conn)
+            assert promoted == 0, (
+                "protocol-violation block must survive recompute_ready"
+            )
+            assert kb.get_task(conn, tid).status == "blocked"
+
+
+def test_protocol_violation_block_clears_on_unblock(kanban_home: Path) -> None:
+    """Operator must still be able to unblock a protocol-violation
+    sticky.  After ``unblock_task`` the most-recent
+    ``{blocked, unblocked, protocol_violation}`` event is
+    ``"unblocked"``, so the sticky predicate returns False and the
+    task can be re-dispatched."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="t")
+        # Synthesize the post-protocol-violation state directly: the
+        # detect_crashed_workers path is covered by the test above; here
+        # we want to pin down only the unblock semantics.
+        conn.execute(
+            "UPDATE tasks SET status='blocked', consecutive_failures=1 "
+            "WHERE id=?",
+            (tid,),
+        )
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, payload, created_at) "
+            "VALUES (?, 'protocol_violation', NULL, ?)",
+            (tid, int(time.time())),
+        )
+        conn.commit()
+
+        # Pre-unblock: sticky guard fires, no promotion.
+        assert kb.recompute_ready(conn) == 0
+        assert kb.get_task(conn, tid).status == "blocked"
+
+        assert kb.unblock_task(conn, tid)
+        # unblock_task flips straight to 'ready' when there are no
+        # undone parents, and emits the 'unblocked' event that clears
+        # the sticky predicate.
+        assert kb.get_task(conn, tid).status == "ready"
+        assert kb.get_task(conn, tid).consecutive_failures == 0
 
 
 # ---------------------------------------------------------------------------

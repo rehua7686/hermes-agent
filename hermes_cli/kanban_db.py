@@ -2841,10 +2841,10 @@ def _synthesize_ended_run(
 # ---------------------------------------------------------------------------
 
 def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Return True when ``task_id`` is sticky-blocked by an explicit
-    worker/operator ``kanban_block`` call (#28712).
+    """Return True when ``task_id`` is sticky-blocked and must not be
+    auto-promoted by ``recompute_ready`` (#28712, #32747).
 
-    A ``blocked`` status can come from two very different sources:
+    A ``blocked`` status can come from three sources:
 
     * **Worker- or operator-initiated** — a worker called
       ``kanban_block(reason="review-required: ...")`` (or somebody ran
@@ -2852,30 +2852,42 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
       should stay blocked until an operator unblocks it.  The block tool
       emits a ``"blocked"`` event row in ``task_events``.
 
-    * **Circuit-breaker** — ``_record_task_failure`` tripped after
-      repeated crashes / spawn failures / timeouts.  This emits
-      ``"gave_up"``, *not* ``"blocked"``, and is meant to recover
-      automatically once the underlying conditions change (e.g. parents
-      finish, transient infra error clears).
+    * **Protocol violation** — the worker subprocess exited cleanly
+      (rc=0) without calling ``kanban_complete`` / ``kanban_block``.
+      ``detect_crashed_workers`` emits a ``"protocol_violation"`` event
+      and immediately trips the circuit breaker.  Re-spawning is
+      deterministically futile (the next worker will do exactly the
+      same thing), so this is treated as sticky too — see #32747 for
+      the respawn-loop incidents this avoids.
 
-    The cheapest signal that distinguishes the two is the most recent
-    ``"blocked"`` / ``"unblocked"`` event for the task.  If the most
-    recent one is ``"blocked"`` (or there is a ``"blocked"`` event and
-    no ``"unblocked"`` event has fired since), the task is sticky and
-    ``recompute_ready`` must *not* auto-promote it.
+    * **Transient circuit-breaker** — ``_record_task_failure`` tripped
+      after repeated crashes / spawn failures / timeouts that are NOT
+      protocol violations.  This emits ``"gave_up"`` (and a preceding
+      ``"crashed"`` / ``"timed_out"`` event) but no ``"blocked"`` /
+      ``"protocol_violation"``, and is meant to recover automatically
+      once the underlying conditions change (parents finish, transient
+      infra error clears).
+
+    The cheapest signal that distinguishes the three is the most recent
+    ``"blocked"`` / ``"unblocked"`` / ``"protocol_violation"`` event
+    for the task.  ``"blocked"`` and ``"protocol_violation"`` both make
+    the task sticky; ``"unblocked"`` clears the stickiness; the
+    transient-breaker case leaves no event in this set at all and falls
+    through to ``False``.
 
     Returns ``False`` when there is no such event at all (e.g. the task
-    was set to ``status='blocked'`` by the circuit breaker or by direct
-    DB manipulation) — preserves the pre-#28712 auto-recover semantics
-    for that path.
+    was set to ``status='blocked'`` by the transient circuit breaker
+    or by direct DB manipulation) — preserves the pre-#28712
+    auto-recover semantics for that path.
     """
     row = conn.execute(
         "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
+        "WHERE task_id = ? "
+        "AND kind IN ('blocked', 'unblocked', 'protocol_violation') "
         "ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
-    return bool(row) and row["kind"] == "blocked"
+    return bool(row) and row["kind"] in ("blocked", "protocol_violation")
 
 
 def recompute_ready(
@@ -2921,10 +2933,11 @@ def recompute_ready(
             task_id = row["id"]
             cur_status = row["status"]
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
-                # Worker / operator asked for human review — do not
-                # silently auto-recover.  ``unblock_task`` is the only
-                # legitimate exit (it emits ``"unblocked"`` which flips
-                # this predicate back).
+                # Worker / operator asked for human review, or worker
+                # tripped a protocol violation (deterministic respawn
+                # loop) — do not silently auto-recover.  ``unblock_task``
+                # is the only legitimate exit (it emits ``"unblocked"``
+                # which flips this predicate back).
                 continue
             parents = conn.execute(
                 "SELECT t.status FROM tasks t "
