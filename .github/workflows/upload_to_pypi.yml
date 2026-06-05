@@ -80,6 +80,75 @@ jobs:
       - name: Build wheel and sdist
         run: uv build --sdist --wheel
 
+      - name: Verify wheel contents
+        # Two-layer check that runs BEFORE the wheel is uploaded to PyPI.
+        # Layer 1 — pyproject.toml config: mirrors the logic in
+        #   tests/test_packaging_metadata.py and catches a misconfigured
+        #   [tool.setuptools.packages.find].include that drops subpackages
+        #   (the root cause of #34346 / #36743).
+        # Layer 2 — built artifact: inspects the .whl ZIP to make sure the
+        #   packages discovered by Layer 1 actually made it into the wheel.
+        #   Catches build-process edge cases that find_packages can't see
+        #   (stale checkout, missing __init__.py, frontend-build ordering).
+        run: |
+          python -c "
+          import sys, glob, tomllib, zipfile
+          from pathlib import Path
+          from setuptools import find_packages
+
+          # ── Layer 1: source config ──────────────────────────────
+          # Read the live pyproject.toml — no hardcoded patterns that
+          # drift out of sync with what the maintainer actually changed.
+          data = tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))
+          include = data['tool']['setuptools']['packages']['find']['include']
+
+          # What the real include list selects.
+          selected = set(find_packages(include=include))
+
+          # Every on-disk subpackage (maximal include: every top-level
+          # package + its .* wildcard).
+          top_level = sorted({n for n in include if '.' not in n})
+          expected = set(
+              find_packages(
+                  include=[p for name in top_level for p in (name, f'{name}.*')],
+              )
+          )
+
+          missing_config = sorted(expected - selected)
+          if missing_config:
+              print('ERROR: packages exist on disk but are dropped by pyproject.toml:')
+              for p in missing_config:
+                  print(f'  - {p}')
+              print("Add the matching '<name>.*' entry to [tool.setuptools.packages.find] include.")
+              sys.exit(1)
+
+          print(f'Layer 1 OK — {len(selected)} packages covered by include list, '
+                f'0 missing (maximal would select {len(expected)}).')
+
+          # ── Layer 2: built wheel ────────────────────────────────
+          whl_files = glob.glob('dist/*.whl')
+          if not whl_files:
+              print('ERROR: No .whl found in dist/')
+              sys.exit(1)
+
+          with zipfile.ZipFile(whl_files[0]) as z:
+              wheel_names = set(z.namelist())
+
+          missing_wheel = []
+          for pkg in sorted(expected):
+              init_path = pkg.replace('.', '/') + '/__init__.py'
+              if init_path not in wheel_names:
+                  missing_wheel.append(init_path)
+
+          if missing_wheel:
+              print('ERROR: Built wheel is missing expected packages:')
+              for m in missing_wheel:
+                  print(f'  - {m}')
+              sys.exit(1)
+
+          print(f'Layer 2 OK — all {len(expected)} expected packages present in {whl_files[0]}.')
+          "
+
       - name: Upload distribution artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
