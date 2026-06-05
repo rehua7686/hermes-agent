@@ -22,6 +22,8 @@ import {
   type CronJob,
   deleteCronJob,
   getCronJobs,
+  getMessagingPlatforms,
+  type MessagingPlatformInfo,
   pauseCronJob,
   resumeCronJob,
   triggerCronJob,
@@ -37,13 +39,35 @@ import { CronJobActionsMenu, CronJobActionsTrigger } from './cron-job-actions-me
 
 const DEFAULT_DELIVER = 'local'
 
-const DELIVERY_OPTIONS: ReadonlyArray<{ label: string; value: string }> = [
+const FALLBACK_DELIVERY_OPTIONS: ReadonlyArray<{ label: string; value: string }> = [
   { label: 'This desktop', value: 'local' },
   { label: 'Telegram', value: 'telegram' },
   { label: 'Discord', value: 'discord' },
   { label: 'Slack', value: 'slack' },
   { label: 'Email', value: 'email' }
 ]
+
+function buildDeliveryOptions(
+  platforms: MessagingPlatformInfo[],
+  currentDeliver: string | undefined
+): { label: string; value: string }[] {
+  const options: { label: string; value: string }[] = [
+    { label: 'This desktop', value: 'local' }
+  ]
+
+  for (const p of platforms) {
+    if (p.id !== 'local' && p.configured) {
+      options.push({ label: p.name || p.id, value: p.id })
+    }
+  }
+
+  // Preserve stale deliver value so the user can still see it
+  if (currentDeliver && !options.some(o => o.value === currentDeliver)) {
+    options.push({ label: currentDeliver, value: currentDeliver })
+  }
+
+  return options
+}
 
 const SCHEDULE_OPTIONS: ReadonlyArray<ScheduleOption> = [
   {
@@ -616,6 +640,9 @@ function CronEditorDialog({
   const [deliver, setDeliver] = useState(DEFAULT_DELIVER)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<null | string>(null)
+  const [deliveryOptions, setDeliveryOptions] = useState<
+    ReadonlyArray<{ label: string; value: string }>
+  >(FALLBACK_DELIVERY_OPTIONS)
 
   useEffect(() => {
     if (!open) {
@@ -629,6 +656,28 @@ function CronEditorDialog({
     setDeliver(initial ? jobDeliver(initial) : DEFAULT_DELIVER)
     setError(null)
     setSaving(false)
+
+    // Fetch configured messaging platforms for delivery options
+    let cancelled = false
+    getMessagingPlatforms()
+      .then(({ platforms }) => {
+        if (cancelled) return
+        const current = initial ? jobDeliver(initial) : DEFAULT_DELIVER
+        setDeliveryOptions(buildDeliveryOptions(platforms, current))
+      })
+      .catch(() => {
+        if (cancelled) return
+        const current = initial ? jobDeliver(initial) : DEFAULT_DELIVER
+        if (current && !FALLBACK_DELIVERY_OPTIONS.some(o => o.value === current)) {
+          setDeliveryOptions([
+            ...FALLBACK_DELIVERY_OPTIONS,
+            { label: current, value: current }
+          ])
+        } else {
+          setDeliveryOptions(FALLBACK_DELIVERY_OPTIONS)
+        }
+      })
+    return () => { cancelled = true }
   }, [initial, open])
 
   const selectedScheduleOption =
@@ -732,7 +781,7 @@ function CronEditorDialog({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {DELIVERY_OPTIONS.map(option => (
+                  {deliveryOptions.map(option => (
                     <SelectItem key={option.value} value={option.value}>
                       {option.label}
                     </SelectItem>
