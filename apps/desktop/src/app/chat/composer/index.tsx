@@ -695,6 +695,7 @@ export function ChatBar({
       }
 
       if (event.key === 'Enter' || event.key === 'Tab') {
+        if ((event.nativeEvent as any).isComposing) {return}
         event.preventDefault()
         triggerKeyConsumedRef.current = true
         const item = triggerItems[triggerActive]
@@ -715,7 +716,7 @@ export function ChatBar({
       }
     }
 
-    if (event.key === 'Enter' && !event.shiftKey) {
+    if (event.key === 'Enter' && !event.shiftKey && !(event.nativeEvent as any).isComposing) {
       event.preventDefault()
 
       if (!busy && !hasComposerPayload && queuedPrompts.length > 0) {
