@@ -331,6 +331,10 @@ export interface ImageAttachResponse {
   width?: number
 }
 
+export interface ImageClearResponse {
+  removed?: number
+}
+
 // ── Voice ────────────────────────────────────────────────────────────
 
 export interface VoiceToggleResponse {
