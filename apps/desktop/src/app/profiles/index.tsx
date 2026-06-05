@@ -504,4 +504,3 @@ function SoulEditor({ profileName }: { profileName: string }) {
     </section>
   )
 }
-
