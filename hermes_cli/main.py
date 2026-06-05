@@ -15298,6 +15298,11 @@ Examples:
         help="Full uninstall - remove everything including configs and data",
     )
     uninstall_parser.add_argument(
+        "--desktop",
+        action="store_true",
+        help="Uninstall only the desktop app (Electron app, built artifacts, Dock pin)",
+    )
+    uninstall_parser.add_argument(
         "--yes", "-y", action="store_true", help="Skip confirmation prompts"
     )
     uninstall_parser.set_defaults(func=cmd_uninstall)
