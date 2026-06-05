@@ -31,6 +31,7 @@ import type {
   ProfileCreatePayload,
   ProfileSoul,
   ProfilesResponse,
+  SessionInfo,
   SessionMessagesResponse,
   SessionSearchResponse,
   SkillInfo,
@@ -142,6 +143,12 @@ export async function listSessions(
   }
 }
 
+export function getSession(id: string): Promise<SessionInfo> {
+  return window.hermesDesktop.api<SessionInfo>({
+    path: `/api/sessions/${encodeURIComponent(id)}`
+  })
+}
+
 // Unified, read-only session list aggregated across ALL profiles. Served by the
 // primary backend straight off each profile's state.db — no per-profile backend
 // is spawned. Single-profile users get the same rows as listSessions(), tagged
@@ -165,7 +172,10 @@ export async function listAllProfileSessions(
     offset: 0
   }
 }
-
+// Unified, read-only session list aggregated across ALL profiles. Served by the
+// primary backend straight off each profile's state.db — no per-profile backend
+// is spawned. Single-profile users get the same rows as listSessions(), tagged
+// profile="default".
 export function setSessionArchived(id: string, archived: boolean): Promise<{ ok: boolean }> {
   return window.hermesDesktop.api<{ ok: boolean }>({
     path: `/api/sessions/${encodeURIComponent(id)}`,
