@@ -34,6 +34,7 @@ import { useRefreshHotkey } from '../hooks/use-refresh-hotkey'
 import { OverlayView } from '../overlays/overlay-view'
 
 import { CronJobActionsMenu, CronJobActionsTrigger } from './cron-job-actions-menu'
+import { CronHistoryDialog } from './history-dialog'
 
 const DEFAULT_DELIVER = 'local'
 
@@ -311,6 +312,7 @@ export function CronView({ onClose }: CronViewProps) {
   const [busyJobId, setBusyJobId] = useState<null | string>(null)
 
   const [editor, setEditor] = useState<EditorState>({ mode: 'closed' })
+  const [historyJob, setHistoryJob] = useState<CronJob | null>(null)
   const [pendingDelete, setPendingDelete] = useState<CronJob | null>(null)
 
   const refresh = useCallback(async () => {
@@ -451,6 +453,7 @@ export function CronView({ onClose }: CronViewProps) {
                   key={job.id}
                   onDelete={() => setPendingDelete(job)}
                   onEdit={() => setEditor({ mode: 'edit', job })}
+                  onHistory={() => setHistoryJob(job)}
                   onPauseResume={() => void handlePauseResume(job)}
                   onTrigger={() => void handleTrigger(job)}
                 />
@@ -460,6 +463,7 @@ export function CronView({ onClose }: CronViewProps) {
         )}
       </div>
       <CronEditorDialog editor={editor} onClose={() => setEditor({ mode: 'closed' })} onSave={handleEditorSave} />
+      <CronHistoryDialog job={historyJob} onClose={() => setHistoryJob(null)} />
 
       <ConfirmDialog
         busyLabel="Deleting…"
@@ -497,6 +501,7 @@ function CronJobRow({
   job,
   onDelete,
   onEdit,
+  onHistory,
   onPauseResume,
   onTrigger
 }: {
@@ -504,6 +509,7 @@ function CronJobRow({
   job: CronJob
   onDelete: () => void
   onEdit: () => void
+  onHistory: () => void
   onPauseResume: () => void
   onTrigger: () => void
 }) {
@@ -548,12 +554,13 @@ function CronJobRow({
         )}
       </button>
 
-      <div className="flex shrink-0 items-center">
+      <div className="flex shrink-0 items-center gap-0.5">
         <CronJobActionsMenu
           busy={busy}
           isPaused={isPaused}
           onDelete={onDelete}
           onEdit={onEdit}
+          onHistory={onHistory}
           onPauseResume={onPauseResume}
           onTrigger={onTrigger}
           title={jobTitle(job)}
