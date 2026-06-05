@@ -1532,7 +1532,9 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
         if not os.environ.get("HERMES_QUIET"):
             print("Installing TUI dependencies…")
         result = subprocess.run(
-            [npm, "install", "--silent", "--no-fund", "--no-audit", "--progress=false"],
+            # --workspace ui-tui avoids resolving apps/desktop. See #38772.
+            [npm, "install", "--silent", "--no-fund", "--no-audit", "--progress=false",
+             "--workspace", "ui-tui"],
             cwd=str(_workspace_root(tui_dir)),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -7007,7 +7009,11 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
     r1 = _run_npm_install_deterministic(
         npm,
         _workspace_root(web_dir),
-        extra_args=("--silent",),
+        # Scope install to the web workspace only so that the full workspace
+        # graph (including apps/desktop with its Electron + node-pty deps) is
+        # never resolved here.  Without --workspace the root package.json's
+        # apps/* glob would pull in desktop on every web build. See #38772.
+        extra_args=("--silent", "--workspace", "web"),
     )
     if r1.returncode != 0:
         _say(
@@ -7016,7 +7022,7 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
         )
         _relay(r1)
         if fatal:
-            _say("  Run manually:  cd web && npm install && npm run build")
+            _say("  Run manually:  npm install --workspace web && npm run build -w web")
         return False
     # First attempt — stream output via idle-timeout helper (issue #33788).
     # capture_output=True on a long Vite build looks identical to a hang;
@@ -7058,7 +7064,7 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
         )
         _relay(r2)
         if fatal:
-            _say("  Run manually:  cd web && npm install && npm run build")
+            _say("  Run manually:  npm install --workspace web && npm run build -w web")
         return False
     _say("  ✓ Web UI built")
     return True
@@ -12281,7 +12287,7 @@ def cmd_dashboard(args):
         )
         if not (_dist_root / "index.html").exists():
             print(f"✗ --skip-build was passed but no web dist found at: {_dist_root}")
-            print("  Pre-build first:  cd web && npm install && npm run build")
+            print("  Pre-build first:  npm install --workspace web && npm run build -w web")
             print("  Or drop --skip-build to build automatically.")
             sys.exit(1)
         print(f"→ Skipping web UI build (--skip-build); using dist at {_dist_root}")
