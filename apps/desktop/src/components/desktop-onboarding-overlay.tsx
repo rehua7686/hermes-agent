@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { Input } from '@/components/ui/input'
 import { getGlobalModelOptions } from '@/hermes'
+import { useTranslation } from '@/i18n'
 import {
   Check,
   ChevronDown,
@@ -117,11 +118,11 @@ const PROVIDER_DISPLAY: Record<string, { order: number; title: string }> = {
 
 const assetPath = (path: string) => `${import.meta.env.BASE_URL}${path.replace(/^\/+/, '')}`
 
-const FLOW_SUBTITLES: Record<OAuthProvider['flow'], string> = {
-  pkce: 'Opens your browser to sign in, then continues here',
-  device_code: 'Opens a verification page in your browser — Hermes connects automatically',
-  loopback: 'Opens your browser to sign in — Hermes connects automatically',
-  external: 'Sign in once in your terminal, then come back to chat'
+const FLOW_SUBTITLE_KEYS: Record<OAuthProvider['flow'], string> = {
+  device_code: 'onboarding.flow.deviceCode',
+  external: 'onboarding.flow.external',
+  loopback: 'onboarding.flow.loopback',
+  pkce: 'onboarding.flow.pkce'
 }
 
 const providerTitle = (p: OAuthProvider) => PROVIDER_DISPLAY[p.id]?.title ?? p.name
@@ -132,6 +133,7 @@ export const sortProviders = (providers: OAuthProvider[]) =>
 
 export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway }: DesktopOnboardingOverlayProps) {
   const onboarding = useStore($desktopOnboarding)
+  const t = useTranslation()
   const boot = useStore($desktopBoot)
   const ctxRef = useRef<OnboardingContext>({ requestGateway, onCompleted })
   ctxRef.current = { requestGateway, onCompleted }
@@ -204,7 +206,7 @@ export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway 
         <Header />
         {onboarding.manual ? (
           <Button
-            aria-label="Close"
+            aria-label={t('common.close')}
             className="absolute right-3 top-3 z-10 text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground"
             onClick={() => closeManualOnboarding()}
             size="icon-sm"
@@ -234,6 +236,7 @@ function ReasonNotice({ reason }: { reason: string }) {
 }
 
 function Preparing({ boot }: { boot: DesktopBootState }) {
+  const t = useTranslation()
   const progress = Math.max(2, Math.min(100, Math.round(boot.progress)))
   const hasError = Boolean(boot.error)
   const installing = boot.phase.startsWith('runtime.')
@@ -241,9 +244,7 @@ function Preparing({ boot }: { boot: DesktopBootState }) {
   return (
     <div className="grid gap-3" role="status">
       <p className="text-sm text-muted-foreground">
-        {installing
-          ? 'Hermes is finishing install. This usually takes under a minute on first run.'
-          : 'Starting Hermes…'}
+        {installing ? t('onboarding.preparing.installing') : t('onboarding.preparing.starting')}
       </p>
       <div className="h-2 overflow-hidden rounded-full bg-muted">
         <div
@@ -264,6 +265,8 @@ function Preparing({ boot }: { boot: DesktopBootState }) {
 }
 
 function Header() {
+  const t = useTranslation()
+
   return (
     <div className="border-b border-(--ui-stroke-tertiary) bg-(--ui-chat-bubble-background) px-5 py-4">
       <div className="flex items-start gap-3">
@@ -271,9 +274,9 @@ function Header() {
           <Sparkles className="size-5" />
         </div>
         <div>
-          <h2 className="text-[0.9375rem] font-semibold tracking-tight">Let's get you setup with Hermes Agent</h2>
+          <h2 className="text-[0.9375rem] font-semibold tracking-tight">{t('onboarding.header.title')}</h2>
           <p className="mt-1 max-w-xl text-[0.8125rem] leading-5 text-(--ui-text-tertiary)">
-            Connect a model provider to start chatting. Most options take one click.
+            {t('onboarding.header.description')}
           </p>
         </div>
       </div>
@@ -282,7 +285,6 @@ function Header() {
 }
 
 export const FEATURED_ID = 'nous'
-const FEATURED_PITCH = 'One subscription, 300+ frontier models — the recommended way to run Hermes'
 const SHOW_ALL_KEY = 'hermes-onboarding-show-all-v1'
 
 const readShowAll = () => {
@@ -304,6 +306,7 @@ const persistShowAll = (value: boolean) => {
 }
 
 export function Picker({ ctx }: { ctx: OnboardingContext }) {
+  const t = useTranslation()
   const { mode, providers } = useStore($desktopOnboarding)
   const [showAll, setShowAll] = useState(readShowAll)
   const ordered = useMemo(() => (providers ? sortProviders(providers) : []), [providers])
@@ -320,7 +323,7 @@ export function Picker({ ctx }: { ctx: OnboardingContext }) {
   }
 
   if (providers === null) {
-    return <Status>Looking up providers...</Status>
+    return <Status>{t('onboarding.picker.lookingUpProviders')}</Status>
   }
 
   const select = (p: OAuthProvider) => void startProviderOAuth(p, ctx)
@@ -348,7 +351,7 @@ export function Picker({ ctx }: { ctx: OnboardingContext }) {
           onClick={() => setShowAll(persistShowAll(!showAll))}
           type="button"
         >
-          {showAll ? 'Collapse' : 'Other providers'}
+          {showAll ? t('onboarding.picker.collapse') : t('onboarding.picker.otherProviders')}
           <ChevronDown className={cn('size-3.5 transition', showAll && 'rotate-180')} />
         </button>
       ) : null}
@@ -358,7 +361,7 @@ export function Picker({ ctx }: { ctx: OnboardingContext }) {
           onClick={() => setOnboardingMode('apikey')}
           type="button"
         >
-          I have an API key
+          {t('onboarding.picker.haveApiKey')}
         </button>
       </div>
     </div>
@@ -372,6 +375,7 @@ export function FeaturedProviderRow({
   onSelect: (provider: OAuthProvider) => void
   provider: OAuthProvider
 }) {
+  const t = useTranslation()
   const loggedIn = provider.status?.logged_in
 
   return (
@@ -392,11 +396,11 @@ export function FeaturedProviderRow({
           ) : (
             <span className="inline-flex items-center gap-1.5 bg-primary px-2 py-0.5 text-[0.64rem] font-semibold uppercase tracking-[0.16em] text-primary-foreground">
               <span aria-hidden="true" className="dither inline-block size-2 shrink-0" />
-              Recommended
+              {t('onboarding.featured.recommended')}
             </span>
           )}
         </div>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground">{FEATURED_PITCH}</p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('onboarding.featured.pitch')}</p>
       </div>
       <ChevronRight className="size-4 shrink-0 text-primary transition group-hover:translate-x-0.5" />
     </button>
@@ -404,15 +408,19 @@ export function FeaturedProviderRow({
 }
 
 function ConnectedTag() {
+  const t = useTranslation()
+
   return (
     <span className="inline-flex items-center gap-1 bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
       <Check className="size-3" />
-      Connected
+      {t('onboarding.connected')}
     </span>
   )
 }
 
 export function KeyProviderRow({ onClick }: { onClick: () => void }) {
+  const t = useTranslation()
+
   return (
     <button
       className="group flex w-full items-center justify-between gap-3 rounded-[6px] px-3 py-2.5 text-left transition-colors hover:bg-(--ui-control-hover-background)"
@@ -421,7 +429,7 @@ export function KeyProviderRow({ onClick }: { onClick: () => void }) {
     >
       <div className="min-w-0">
         <span className="text-[length:var(--conversation-text-font-size)] font-semibold">OpenRouter</span>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground">One key, hundreds of models — a solid default</p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('onboarding.apiKey.openrouter.shortDefault')}</p>
       </div>
       <ChevronRight className="size-4 text-muted-foreground transition group-hover:text-foreground" />
     </button>
@@ -435,6 +443,7 @@ export function ProviderRow({
   onSelect: (provider: OAuthProvider) => void
   provider: OAuthProvider
 }) {
+  const t = useTranslation()
   const loggedIn = provider.status?.logged_in
   const Trail = provider.flow === 'external' ? Terminal : ChevronRight
 
@@ -451,7 +460,7 @@ export function ProviderRow({
           </span>
           {loggedIn ? <ConnectedTag /> : null}
         </div>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground">{FLOW_SUBTITLES[provider.flow]}</p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">{t(FLOW_SUBTITLE_KEYS[provider.flow])}</p>
       </div>
       <Trail className="size-4 text-muted-foreground transition group-hover:text-foreground" />
     </button>

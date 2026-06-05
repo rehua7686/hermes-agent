@@ -2,15 +2,19 @@ import { useStore } from '@nanostores/react'
 import type { ReactNode } from 'react'
 
 import { SegmentedControl } from '@/components/ui/segmented-control'
+import { DESKTOP_LANGUAGES, useI18n, useTranslation } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { Check } from '@/lib/icons'
 import { cn } from '@/lib/utils'
+import { notifyError } from '@/store/notifications'
 import { $toolViewMode, setToolViewMode } from '@/store/tool-view'
 import { useTheme } from '@/themes/context'
 import { BUILTIN_THEMES } from '@/themes/presets'
 
 import { MODE_OPTIONS } from './constants'
 import { SettingsContent } from './primitives'
+
+const themeDescriptionKey = (name: string) => `settings.appearance.theme.${name}.description`
 
 function ThemePreview({ name }: { name: string }) {
   const t = BUILTIN_THEMES[name]
@@ -68,15 +72,63 @@ function SectionHead({ title, description, control }: { title: string; descripti
 
 export function AppearanceSettings() {
   const { themeName, mode, availableThemes, setTheme, setMode } = useTheme()
+  const { isSavingLanguage, language, setLanguage } = useI18n()
+  const t = useTranslation()
   const toolViewMode = useStore($toolViewMode)
+
+  const languageOptions = DESKTOP_LANGUAGES.map(option => ({
+    id: option.id,
+    label: t(option.translationKey)
+  }))
+
+  const modeOptions = MODE_OPTIONS.map(option => ({
+    id: option.id,
+    icon: option.icon,
+    label: t(option.labelKey)
+  }))
+
+  const selectLanguage = async (nextLanguage: typeof language) => {
+    if (nextLanguage === language || isSavingLanguage) {
+      return
+    }
+
+    triggerHaptic('selection')
+
+    try {
+      await setLanguage(nextLanguage)
+      triggerHaptic('success')
+    } catch (error) {
+      notifyError(error, t('settings.appearance.language.saveError'))
+    }
+  }
 
   return (
     <SettingsContent>
       <div className="grid gap-8">
         <p className="max-w-2xl text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
-          These are desktop-only display preferences. Mode controls brightness; theme controls the accent palette and
-          chat surface styling.
+          {t('settings.appearance.description')}
         </p>
+
+        <section>
+          <SectionHead
+            control={
+              <div className="grid justify-items-end gap-1.5">
+                <SegmentedControl
+                  onChange={next => void selectLanguage(next)}
+                  options={languageOptions}
+                  value={language}
+                />
+                {isSavingLanguage && (
+                  <span className="text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
+                    {t('settings.appearance.language.saving')}
+                  </span>
+                )}
+              </div>
+            }
+            description={t('settings.appearance.language.description')}
+            title={t('settings.appearance.language.title')}
+          />
+        </section>
 
         <section>
           <SectionHead
@@ -86,12 +138,12 @@ export function AppearanceSettings() {
                   triggerHaptic('crisp')
                   setMode(id)
                 }}
-                options={MODE_OPTIONS}
+                options={modeOptions}
                 value={mode}
               />
             }
-            description="Pick a fixed mode or let Hermes follow your system setting."
-            title="Color Mode"
+            description={t('settings.appearance.mode.description')}
+            title={t('settings.appearance.mode.title')}
           />
         </section>
 
@@ -105,20 +157,23 @@ export function AppearanceSettings() {
                 }}
                 options={
                   [
-                    { id: 'product', label: 'Product' },
-                    { id: 'technical', label: 'Technical' }
+                    { id: 'product', label: t('settings.appearance.toolDisplay.product') },
+                    { id: 'technical', label: t('settings.appearance.toolDisplay.technical') }
                   ] as const
                 }
                 value={toolViewMode}
               />
             }
-            description="Product hides raw tool payloads; Technical shows full input/output."
-            title="Tool Call Display"
+            description={t('settings.appearance.toolDisplay.description')}
+            title={t('settings.appearance.toolDisplay.title')}
           />
         </section>
 
         <section className="grid gap-3">
-          <SectionHead description="Desktop palettes only. The selected mode is applied on top." title="Theme" />
+          <SectionHead
+            description={t('settings.appearance.theme.description')}
+            title={t('settings.appearance.theme.title')}
+          />
           <div className="grid gap-x-4 gap-y-5 sm:grid-cols-2 xl:grid-cols-3">
             {availableThemes.map(theme => {
               const active = themeName === theme.name
@@ -149,7 +204,7 @@ export function AppearanceSettings() {
                         {theme.label}
                       </div>
                       <div className="mt-0.5 line-clamp-2 text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
-                        {theme.description}
+                        {t(themeDescriptionKey(theme.name))}
                       </div>
                     </div>
                     {active && <Check className="mt-0.5 size-4 shrink-0 text-primary" />}
