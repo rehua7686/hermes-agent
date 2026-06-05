@@ -12399,7 +12399,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "model", "pairing", "plugins", "portal", "postinstall", "profile", "proxy",
         "prompt-size",
         "send", "sessions", "setup",
-        "skills", "slack", "status", "tools", "uninstall", "update",
+        "skills", "slack", "status", "sync", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an
@@ -12840,6 +12840,83 @@ def main():
         help="Remove all fallback entries",
     )
     fallback_parser.set_defaults(func=cmd_fallback)
+
+    # =========================================================================
+    # sync command — back up / sync the profile to the user's own git repo
+    # =========================================================================
+    from hermes_cli.sync_cmd import cmd_sync
+
+    sync_parser = subparsers.add_parser(
+        "sync",
+        help="Back up and sync your profile (skills, memory, persona) to your own git repo",
+        description=(
+            "Back up a curated subset of your Hermes profile — skills, memory "
+            "(MEMORY.md / USER.md), persona (SOUL.md), and an allow-listed slice "
+            "of config — to a git repository YOU control. Plain git, your repo, "
+            "no Nous portal. A pre-push secret scan refuses to push anything "
+            "secret-shaped (API keys, private keys, tokens)."
+        ),
+    )
+    sync_subparsers = sync_parser.add_subparsers(dest="sync_command")
+
+    sync_init = sync_subparsers.add_parser(
+        "init",
+        help="Initialize profile sync (choose private/public, set up the remote)",
+    )
+    sync_init.add_argument(
+        "--private",
+        dest="visibility",
+        action="store_const",
+        const="private",
+        help="Create/use a PRIVATE repo (this is the default).",
+    )
+    sync_init.add_argument(
+        "--public",
+        dest="visibility",
+        action="store_const",
+        const="public",
+        help="Create/use a PUBLIC repo (world-readable — only for sharing).",
+    )
+    sync_init.add_argument(
+        "--remote",
+        help="Use this existing git remote URL instead of creating a repo via gh.",
+    )
+
+    sync_push = sync_subparsers.add_parser(
+        "push",
+        help="Stage, secret-scan, commit, and push the synced subset",
+    )
+    sync_push.add_argument(
+        "-m", "--message", help="Commit message (default: timestamped)."
+    )
+
+    sync_pull = sync_subparsers.add_parser(
+        "pull",
+        help="Pull from the remote and update the local profile (last-writer-wins)",
+    )
+    sync_pull.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite locally-modified files without confirmation.",
+    )
+
+    sync_subparsers.add_parser(
+        "status",
+        help="Show remote, visibility, last sync, and pending changes (default)",
+    )
+
+    sync_share = sync_subparsers.add_parser(
+        "share",
+        help="Print the install command for one skill; optionally push just that skill",
+    )
+    sync_share.add_argument("skill_name", help="Name of the skill to share")
+    sync_share.add_argument(
+        "--push",
+        action="store_true",
+        help="Also stage + push just this skill to the sync repo.",
+    )
+
+    sync_parser.set_defaults(func=cmd_sync)
 
     # =========================================================================
     # secrets command — external secret managers (currently: Bitwarden)
