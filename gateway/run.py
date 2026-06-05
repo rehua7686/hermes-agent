@@ -3636,14 +3636,15 @@ class GatewayRunner:
         active = self._snapshot_running_agents()
         restart_source = self._restart_command_source if self._restart_requested else None
 
-        action = "restarting" if self._restart_requested else "shutting down"
+        action = t("gateway.shutdown.restarting") if self._restart_requested else t("gateway.shutdown.shutting_down")
         hint = (
-            "Your current task will be interrupted. "
-            "Send any message after restart and I'll try to resume where you left off."
+            t("gateway.shutdown.restart_hint",
+              "Your current task will be interrupted. "
+              "Send any message after restart and I'll try to resume where you left off.")
             if self._restart_requested
-            else "Your current task will be interrupted."
+            else t("gateway.shutdown.stop_hint")
         )
-        msg = f"⚠️ Gateway {action} — {hint}"
+        msg = t("gateway.shutdown.message").format(action=action, hint=hint)
 
         notified: set[tuple[str, str, Optional[str]]] = set()
         for session_key in active:
@@ -7764,7 +7765,7 @@ class GatewayRunner:
             if event.get_command() in {"queue", "q"}:
                 queued_text = event.get_command_args().strip()
                 if not queued_text:
-                    return "Usage: /queue <prompt>"
+                    return t("gateway.queue_usage")
                 adapter = self.adapters.get(source.platform)
                 if adapter:
                     queued_event = MessageEvent(
@@ -7777,8 +7778,8 @@ class GatewayRunner:
                     self._enqueue_fifo(_quick_key, queued_event, adapter)
                 depth = self._queue_depth(_quick_key, adapter=self.adapters.get(source.platform))
                 if depth <= 1:
-                    return "Queued for the next turn."
-                return f"Queued for the next turn. ({depth} queued)"
+                    return t("gateway.queued_simple")
+                return t("gateway.queue_queued").format(depth=depth)
 
             # /steer <prompt> — inject mid-run after the next tool call.
             # Unlike /queue (turn boundary), /steer lands BETWEEN tool-call
@@ -7788,7 +7789,7 @@ class GatewayRunner:
             if _cmd_def_inner and _cmd_def_inner.name == "steer":
                 steer_text = event.get_command_args().strip()
                 if not steer_text:
-                    return "Usage: /steer <prompt>"
+                    return t("gateway.steer_usage")
                 running_agent = self._running_agents.get(_quick_key)
                 if running_agent is _AGENT_PENDING_SENTINEL:
                     # Agent hasn't started yet — queue as turn-boundary fallback.
@@ -7802,7 +7803,7 @@ class GatewayRunner:
                             channel_prompt=event.channel_prompt,
                         )
                         adapter._pending_messages[_quick_key] = queued_event
-                    return "Agent still starting — /steer queued for the next turn."
+                    return t("gateway.agent_starting")
                 if running_agent and hasattr(running_agent, "steer"):
                     try:
                         accepted = running_agent.steer(steer_text)
@@ -7811,8 +7812,8 @@ class GatewayRunner:
                         return f"⚠️ Steer failed: {exc}"
                     if accepted:
                         preview = steer_text[:60] + ("..." if len(steer_text) > 60 else "")
-                        return f"⏩ Steer queued — arrives after the next tool call: '{preview}'"
-                    return "Steer rejected (empty payload)."
+                        return t("gateway.steer_accepted").format(preview=preview)
+                    return t("gateway.steer_empty")
                 # Running agent is missing or lacks steer() — fall back to queue.
                 adapter = self.adapters.get(source.platform)
                 if adapter:
@@ -7824,11 +7825,11 @@ class GatewayRunner:
                         channel_prompt=event.channel_prompt,
                     )
                     adapter._pending_messages[_quick_key] = queued_event
-                return "No active agent — /steer queued for the next turn."
+                return t("gateway.no_active_agent")
 
             # /model must not be used while the agent is running.
             if _cmd_def_inner and _cmd_def_inner.name == "model":
-                return "Agent is running — wait or /stop first, then switch models."
+                return t("gateway.agent_running_model")
 
             # /codex-runtime must not be used while the agent is running.
             # Switching mid-turn would split a turn across two transports.
@@ -8342,7 +8343,7 @@ class GatewayRunner:
                                 output = redact_sensitive_text(output)
                             return output if output else "Command returned no output."
                         except asyncio.TimeoutError:
-                            return "Quick command timed out (30s)."
+                            return t("gateway.quick_cmd_timeout")
                         except Exception as e:
                             return f"Quick command error: {e}"
                     else:
@@ -8462,10 +8463,12 @@ class GatewayRunner:
                             source.platform.value if source.platform else "?",
                         )
                         return (
-                            f"Unknown command `/{command}`. "
-                            f"Type /commands to see what's available, "
-                            f"or resend without the leading slash to send "
-                            f"as a regular message."
+                            t("gateway.unknown_command",
+                              "Unknown command `/{command}`. "
+                              "Type /commands to see what's available, "
+                              "or resend without the leading slash to send "
+                              "as a regular message."
+                              ).format(command=command)
                         )
             except Exception as e:
                 logger.debug("Skill command check failed (non-fatal): %s", e)
@@ -10010,14 +10013,14 @@ class GatewayRunner:
             ctx_display = str(context_length)
 
         lines = [
-            f"◆ Model: `{model}`",
-            f"◆ Provider: {provider or 'openrouter'}",
-            f"◆ Context: {ctx_display} tokens ({ctx_source})",
+            t("gateway.reset.model").format(model=model),
+            t("gateway.reset.provider").format(provider=provider or 'openrouter'),
+            t("gateway.reset.context").format(ctx_display=ctx_display, ctx_source=ctx_source),
         ]
 
         # Show endpoint for local/custom setups
         if base_url and ("localhost" in base_url or "127.0.0.1" in base_url or "0.0.0.0" in base_url):
-            lines.append(f"◆ Endpoint: {base_url}")
+            lines.append(t("gateway.reset.endpoint").format(base_url=base_url))
 
         return "\n".join(lines)
 
@@ -14571,7 +14574,7 @@ class GatewayRunner:
 
         async def _on_confirm(choice: str):
             if choice == "cancel":
-                return f"🟡 /{command} cancelled. Conversation unchanged."
+                return t("gateway.confirm.cancelled").format(command=command)
             if choice == "always":
                 try:
                     from cli import save_config_value
@@ -14587,9 +14590,10 @@ class GatewayRunner:
             result = await execute()
             if choice == "always":
                 note = (
-                    "\n\nℹ️ Future /clear, /new, /reset, and /undo will run "
-                    "without confirmation. Re-enable via "
-                    "`approvals.destructive_slash_confirm: true` in config.yaml."
+                    "\n\n" + t("gateway.confirm.always_note",
+                        "ℹ️ Future /clear, /new, /reset, and /undo will run "
+                        "without confirmation. Re-enable via "
+                        "`approvals.destructive_slash_confirm: true` in config.yaml.")
                 )
                 if isinstance(result, str):
                     return result + note
@@ -14600,13 +14604,13 @@ class GatewayRunner:
             return result
 
         prompt_message = (
-            f"⚠️ **Confirm /{command}**\n\n"
-            f"{detail}\n\n"
-            "Choose:\n"
-            "• **Approve Once** — proceed this time only\n"
-            "• **Always Approve** — proceed and silence this prompt permanently\n"
-            "• **Cancel** — keep current conversation\n\n"
-            "_Text fallback: reply `/approve`, `/always`, or `/cancel`._"
+            t("gateway.confirm.title").format(command=command) + "\n\n"
+            + detail + "\n\n"
+            + t("gateway.confirm.choose") + "\n"
+            + t("gateway.confirm.once") + "\n"
+            + t("gateway.confirm.always") + "\n"
+            + t("gateway.confirm.cancel") + "\n\n"
+            + t("gateway.confirm.fallback")
         )
         return await self._request_slash_confirm(
             event=event,
