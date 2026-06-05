@@ -166,11 +166,11 @@ export async function listAllProfileSessions(
   }
 }
 
-export function setSessionArchived(id: string, archived: boolean): Promise<{ ok: boolean }> {
+export function setSessionArchived(id: string, archived: boolean, profile?: string | null): Promise<{ ok: boolean }> {
   return window.hermesDesktop.api<{ ok: boolean }>({
     path: `/api/sessions/${encodeURIComponent(id)}`,
     method: 'PATCH',
-    body: { archived }
+    body: { archived, ...(profile ? { profile } : {}) }
   })
 }
 
@@ -190,9 +190,11 @@ export function getSessionMessages(id: string, profile?: string | null): Promise
   })
 }
 
-export function deleteSession(id: string): Promise<{ ok: boolean }> {
+export function deleteSession(id: string, profile?: string | null): Promise<{ ok: boolean }> {
+  const suffix = profile ? `?profile=${encodeURIComponent(profile)}` : ''
+
   return window.hermesDesktop.api<{ ok: boolean }>({
-    path: `/api/sessions/${encodeURIComponent(id)}`,
+    path: `/api/sessions/${encodeURIComponent(id)}${suffix}`,
     method: 'DELETE'
   })
 }
