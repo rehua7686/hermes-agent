@@ -86,7 +86,7 @@ import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, TextIO
 
 from toolsets import get_toolset_names
 
@@ -102,6 +102,43 @@ VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
+
+# Optional fcntl import — Windows does not ship fcntl.
+# On non-Windows platforms, used for per-DB inter-process write locking.
+# On Windows, _KANBAN_WRITE_LOCKS entries are None and flock is a no-op.
+try:
+    import fcntl  # type: ignore[import-not-found,import-untyped]
+except ImportError:
+    fcntl = None  # type: ignore[assignment]  # Windows / other platforms without fcntl
+
+# Maps resolved DB path → open file handle for per-DB write locking.
+# Using the resolved path (str) as key instead of id(conn) avoids stale
+# handle reuse when a connection is GC'd and a new one reuses the same
+# memory address in long-lived processes (#37344 review feedback).
+_KANBAN_WRITE_LOCKS: dict[str, "TextIO | None"] = {}
+
+# Reverse mapping: id(conn) → resolved DB path, so write_txn() can look up
+# the per-DB lock handle from a sqlite3.Connection without needing the path
+# passed in explicitly.  Entries are cleaned up alongside _KANBAN_WRITE_LOCKS.
+_KANBAN_CONN_PATHS: dict[int, str] = {}
+
+
+def _kanban_release_write_lock(db_path: str, conn: Optional[sqlite3.Connection] = None) -> None:
+    """Close the .db.lock handle and remove the entry for a given DB path.
+
+    Also removes the reverse id(conn)→path mapping if conn is provided.
+    Called from connect()'s exception handler, connect_closing()'s finally
+    block, and any code path that closes a kanban connection.  Prevents FD
+    leaks (#37344 review feedback — re-introducing #33159 class of bug).
+    """
+    lock_handle = _KANBAN_WRITE_LOCKS.pop(db_path, None)
+    if lock_handle is not None:
+        try:
+            lock_handle.close()
+        except OSError:
+            pass
+    if conn is not None:
+        _KANBAN_CONN_PATHS.pop(id(conn), None)
 
 # A running task's claim is valid for 15 minutes by default; after that the
 # next dispatcher tick reclaims it. Workers that outlive this window should
@@ -1450,6 +1487,22 @@ def connect(
         _guard_existing_db_is_healthy(path)
         resolved = str(path.resolve())
         conn = _sqlite_connect(path)
+        # Per-DB file-level write lock — prevents multiple worker processes from
+        # racing through BEGIN IMMEDIATE transactions simultaneously, which can
+        # corrupt the WAL under heavy concurrent write pressure (task_events +
+        # task_runs + status transitions all within the same tick).  Windows
+        # (no fcntl) and network filesystems gracefully fall back to no-op.
+        if fcntl is not None:
+            lock_path = path.with_suffix('.db.lock')
+            try:
+                _KANBAN_WRITE_LOCKS[resolved] = open(lock_path, 'w')
+            except OSError:
+                _KANBAN_WRITE_LOCKS[resolved] = None  # best-effort: don't fail
+        else:
+            _KANBAN_WRITE_LOCKS[resolved] = None  # Windows / no-fcntl: skip file lock entirely
+        # Reverse mapping so write_txn() can resolve the per-DB lock handle
+        # from the sqlite3.Connection alone (no path arg needed).
+        _KANBAN_CONN_PATHS[id(conn)] = resolved
         try:
             conn.row_factory = sqlite3.Row
             with _INIT_LOCK:
@@ -1480,10 +1533,25 @@ def connect(
                     # process are cheap. The lock prevents same-process dispatcher
                     # threads from racing through the additive ALTER TABLE pass with
                     # stale PRAGMA snapshots during gateway startup.
-                    conn.executescript(SCHEMA_SQL)
-                    _migrate_add_optional_columns(conn)
+                    #
+                    # CRITICAL: DDL writes (executescript + migrations) must be under
+                    # the per-DB .db.lock to prevent racing with other processes'
+                    # write_txn() calls. Without this, a new worker's schema init can
+                    # collide with a dispatching gateway's DML writes, corrupting
+                    # the WAL. .init.lock alone is NOT sufficient because it is a
+                    # different file from .db.lock.
+                    lock_handle = _KANBAN_WRITE_LOCKS.get(resolved)
+                    if lock_handle is not None:
+                        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+                    try:
+                        conn.executescript(SCHEMA_SQL)
+                        _migrate_add_optional_columns(conn)
+                    finally:
+                        if lock_handle is not None:
+                            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
                     _INITIALIZED_PATHS.add(resolved)
         except Exception:
+            _kanban_release_write_lock(resolved)
             conn.close()
             raise
     return conn
@@ -1518,6 +1586,11 @@ def connect_closing(
     try:
         yield conn
     finally:
+        # Release the per-DB write lock handle before closing the connection
+        # to prevent FD leaks (#37344 review feedback).
+        resolved_path = _KANBAN_CONN_PATHS.get(id(conn))
+        if resolved_path is not None:
+            _kanban_release_write_lock(resolved_path, conn)
         try:
             conn.close()
         except Exception:
@@ -1986,10 +2059,21 @@ def write_txn(conn: sqlite3.Connection):
     task + recording an event, etc.).  A claim CAS inside this context is
     atomic -- at most one concurrent writer can succeed.
 
+    Additionally, if conn's corresponding lock fd is set (by connect()),
+    an inter-process exclusive file lock is acquired around the entire
+    transaction.  This prevents multiple worker processes from racing
+    through BEGIN IMMEDIATE simultaneously, which can corrupt the WAL
+    under heavy concurrent write pressure.  On platforms without fcntl
+    or when the lock fd is unavailable, this is a graceful no-op.
+
     The explicit ROLLBACK on exception is wrapped in try/except so that
     a SQLite auto-rollback (which leaves no active transaction) does not
     shadow the original exception with a spurious rollback error.
     """
+    db_path = _KANBAN_CONN_PATHS.get(id(conn))
+    lock_handle = _KANBAN_WRITE_LOCKS.get(db_path) if db_path else None
+    if lock_handle is not None:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
     conn.execute("BEGIN IMMEDIATE")
     try:
         yield conn
@@ -2007,6 +2091,9 @@ def write_txn(conn: sqlite3.Connection):
         # Post-commit file-length check: header page_count must match actual file pages.
         # A discrepancy means a torn-extend — raise now rather than silently corrupt.
         _check_file_length_invariant(conn)
+    finally:
+        if lock_handle is not None:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
 # ---------------------------------------------------------------------------
