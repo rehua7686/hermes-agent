@@ -15,6 +15,7 @@ import { $currentBranch, $currentCwd } from '@/store/session'
 
 import { SidebarPanelLabel } from '../shell/sidebar-label'
 
+import { ExecTargetBadge } from './exec-target-badge'
 import { ProjectTree } from './files/tree'
 import { useProjectTree } from './files/use-project-tree'
 import { $rightSidebarTab, $terminalTakeover, type RightSidebarTabId, setRightSidebarTab } from './store'
@@ -58,6 +59,7 @@ export function RightSidebarPane({ onActivateFile, onActivateFolder, onChangeCwd
     data,
     loadChildren,
     openState,
+    refreshDir,
     refreshRoot,
     rootError,
     rootLoading,
@@ -128,6 +130,7 @@ export function RightSidebarPane({ onActivateFile, onActivateFolder, onChangeCwd
           onNodeOpenChange={setNodeOpen}
           onPreviewFile={previewFile}
           onRefresh={() => void refreshRoot()}
+          onRefreshDir={refreshDir}
           openState={openState}
         />
       )}
@@ -167,12 +170,15 @@ function RightSidebarChrome({
           ))}
         </nav>
 
-        {branch && (
-          <span className="ml-auto flex min-w-0 items-center gap-1 text-[0.6875rem] text-(--ui-text-tertiary)">
-            <Codicon className="shrink-0" name="git-branch" size="0.75rem" />
-            <span className="truncate">{branch}</span>
-          </span>
-        )}
+        <span className="ml-auto flex min-w-0 items-center gap-2">
+          <ExecTargetBadge />
+          {branch && (
+            <span className="flex min-w-0 items-center gap-1 text-[0.6875rem] text-(--ui-text-tertiary)">
+              <Codicon className="shrink-0" name="git-branch" size="0.75rem" />
+              <span className="truncate">{branch}</span>
+            </span>
+          )}
+        </span>
       </div>
     </header>
   )
@@ -212,6 +218,7 @@ function FilesystemTab({
   onNodeOpenChange,
   onPreviewFile,
   onRefresh,
+  onRefreshDir,
   openState
 }: FilesystemTabProps) {
   return (
@@ -267,6 +274,7 @@ function FilesystemTab({
         onLoadChildren={onLoadChildren}
         onNodeOpenChange={onNodeOpenChange}
         onPreviewFile={onPreviewFile}
+        onRefreshDir={onRefreshDir}
         openState={openState}
       />
     </div>
@@ -288,6 +296,7 @@ interface FileTreeBodyProps {
   onLoadChildren: (id: string) => void | Promise<void>
   onNodeOpenChange: (id: string, open: boolean) => void
   onPreviewFile?: (path: string) => void
+  onRefreshDir?: (dirPath: string) => void | Promise<void>
   openState: ReturnType<typeof useProjectTree>['openState']
 }
 
@@ -302,6 +311,7 @@ function FileTreeBody({
   onLoadChildren,
   onNodeOpenChange,
   onPreviewFile,
+  onRefreshDir,
   openState
 }: FileTreeBodyProps) {
   if (!cwd) {
@@ -346,6 +356,7 @@ function FileTreeBody({
         onLoadChildren={onLoadChildren}
         onNodeOpenChange={onNodeOpenChange}
         onPreviewFile={onPreviewFile}
+        onRefreshDir={onRefreshDir}
         openState={openState}
       />
     </ErrorBoundary>
