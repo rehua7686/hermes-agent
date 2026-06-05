@@ -45,6 +45,9 @@ from hermes_time import now as _hermes_now
 
 logger = logging.getLogger(__name__)
 
+_CRON_AGENT_POLL_INTERVAL = 5.0
+_CRON_AGENT_INTERRUPT_GRACE_SECONDS = 30.0
+
 
 class CronPromptInjectionBlocked(Exception):
     """Raised by _build_job_prompt when the fully-assembled prompt trips the
@@ -1782,7 +1785,6 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         else:
             _cron_timeout = 600.0
         _cron_inactivity_limit = _cron_timeout if _cron_timeout > 0 else None
-        _POLL_INTERVAL = 5.0
         _cron_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         # Preserve scheduler-scoped ContextVar state (for example skill-declared
         # env passthrough registrations) when the cron run hops into the worker
@@ -1790,6 +1792,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         _cron_context = contextvars.copy_context()
         _cron_future = _cron_pool.submit(_cron_context.run, agent.run_conversation, prompt)
         _inactivity_timeout = False
+        _interrupt_requested = False
         try:
             if _cron_inactivity_limit is None:
                 # Unlimited — just wait for the result.
@@ -1798,7 +1801,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 result = None
                 while True:
                     done, _ = concurrent.futures.wait(
-                        {_cron_future}, timeout=_POLL_INTERVAL,
+                        {_cron_future}, timeout=_CRON_AGENT_POLL_INTERVAL,
                     )
                     if done:
                         result = _cron_future.result()
@@ -1813,7 +1816,20 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                             pass
                     if _idle_secs >= _cron_inactivity_limit:
                         _inactivity_timeout = True
+                        _interrupt = getattr(agent, "interrupt", None)
+                        if callable(_interrupt):
+                            _interrupt("Cron job timed out (inactivity)")
+                            _interrupt_requested = True
                         break
+                if _inactivity_timeout and _interrupt_requested:
+                    try:
+                        _cron_future.result(
+                            timeout=_CRON_AGENT_INTERRUPT_GRACE_SECONDS
+                        )
+                    except concurrent.futures.TimeoutError:
+                        pass
+                    except Exception:
+                        pass
         except Exception:
             _cron_pool.shutdown(wait=False, cancel_futures=True)
             raise
@@ -1841,8 +1857,6 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 _last_desc, _iter_n, _iter_max,
                 _cur_tool or "none",
             )
-            if hasattr(agent, "interrupt"):
-                agent.interrupt("Cron job timed out (inactivity)")
             raise TimeoutError(
                 f"Cron job '{job_name}' idle for "
                 f"{int(_secs_ago)}s (limit {int(_cron_inactivity_limit)}s) "
