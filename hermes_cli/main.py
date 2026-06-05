@@ -12841,6 +12841,7 @@ def main():
     )
     model_parser.set_defaults(func=cmd_model)
 
+
     # =========================================================================
     # fallback command — manage the fallback provider chain
     # =========================================================================
